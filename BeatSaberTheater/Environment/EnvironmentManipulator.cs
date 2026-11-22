@@ -137,7 +137,7 @@ public class EnvironmentManipulator : IInitializable
         // Move back to the DontDestroyOnLoad scene
         Object.DontDestroyOnLoad(_playbackManager);
 
-        if (!_config.PluginEnabled || videoConfig == null ||
+        if (!_config.TheaterActive || videoConfig == null ||
             (!videoConfig.IsPlayable && (videoConfig.forceEnvironmentModifications == null ||
                                          videoConfig.forceEnvironmentModifications == false)))
         {

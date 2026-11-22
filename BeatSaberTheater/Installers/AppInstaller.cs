@@ -1,4 +1,5 @@
 using BeatSaberTheater.Services;
+using BeatSaberTheater.Settings;
 using BeatSaberTheater.Util;
 using Zenject;
 
@@ -26,6 +27,7 @@ internal class AppInstaller : Installer
     {
         // This allows the same instance of PluginConfig to be injected into in any class anywhere in the plugin
         Container.BindInstance(_pluginConfig).AsSingle();
+        Container.Bind<DisplaySettings>().AsSingle();
         Container.BindInterfacesAndSelfTo<LoggingService>().AsSingle();
         Container.Bind<TheaterCoroutineStarter>().FromNewComponentOnNewGameObject().AsSingle();
         Container.BindInterfacesAndSelfTo<YtDlpUpdateService>().AsSingle();

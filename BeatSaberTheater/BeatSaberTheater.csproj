@@ -32,6 +32,8 @@
         <EmbeddedResource Include="Settings\Views\settings.bsml"/>
         <None Remove="Resources\trash.png"/>
         <EmbeddedResource Include="Resources\trash.png"/>
+        <None Remove="Resources\gear.png"/>
+        <EmbeddedResource Include="Resources\gear.png"/>
         <None Remove="Resources\configs.json"/>
         <EmbeddedResource Include="Resources\configs.json"/>
         <None Remove="VideoMenu\Views\level-detail.bsml"/>

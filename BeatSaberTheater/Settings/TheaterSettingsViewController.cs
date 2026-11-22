@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using BeatSaberMarkupLanguage.Attributes;
+using BeatSaberMarkupLanguage.Parser;
 using BeatSaberMarkupLanguage.ViewControllers;
 using BeatSaberTheater.Util;
 using JetBrains.Annotations;
@@ -14,26 +15,18 @@ internal class TheaterSettingsViewController
 {
     [Inject] private LoggingService _loggingService = null!;
     [Inject] private PluginConfig _config = null!;
+    [Inject] private DisplaySettings _displaySettings = null!;
+    [UIParams] private readonly BSMLParserParams? _parserParams = null;
 
-    private const float FADE_DURATION = 0.2f;
     [UIValue("modes")][UsedImplicitly] private List<object> _qualityModes = VideoQuality.GetModeList();
     [UIValue("formats")][UsedImplicitly] private List<object> _videoFormats = VideoFormats.GetFormatList();
 
+    // The on/off switch, bloom and corner roundness are shared with the Display view in the Theater tab
     [UIValue("show-video")]
-    public bool PluginEnabled
+    public bool TheaterEnabled
     {
-        get => _config.PluginEnabled;
-        set
-        {
-            if (value)
-                SetSettingsTexture();
-            // PlaybackController.Instance.VideoPlayer.FadeIn(FADE_DURATION);
-            // else
-            // PlaybackController.Instance.VideoPlayer.FadeOut(FADE_DURATION);
-            // VideoMenu.VideoMenuUI.Instance?.HandleDidSelectLevel(null);
-
-            _config.PluginEnabled = value;
-        }
+        get => _displaySettings.TheaterEnabled;
+        set => _displaySettings.TheaterEnabled = value;
     }
 
     [UIValue("override-environment")]
@@ -60,27 +53,22 @@ internal class TheaterSettingsViewController
     [UIValue("bloom-intensity")]
     public int BloomIntensity
     {
-        get => _config.BloomIntensity;
-        set => _config.BloomIntensity = value;
+        get => _displaySettings.Bloom;
+        set => _displaySettings.Bloom = value;
     }
 
     [UIValue("corner-roundness")]
     public int CornerRoundness
     {
-        get => (int)Math.Round(_config.CornerRoundness * 100);
-        set => _config.CornerRoundness = value / 100f;
-        // PlaybackController.Instance.VideoPlayer.screenController.SetVignette();
+        get => _displaySettings.CornerRoundness;
+        set => _displaySettings.CornerRoundness = value;
     }
 
     [UIValue("curved-screen")]
     public bool CurvedScreen
     {
         get => _config.CurvedScreen;
-        set
-        {
-            _config.CurvedScreen = value;
-            if (PluginEnabled) SetSettingsTexture();
-        }
+        set => _config.CurvedScreen = value;
     }
 
     [UIValue("transparency-enabled")]
@@ -156,22 +144,12 @@ internal class TheaterSettingsViewController
         set => _config.YtDlpAutoConfig = value;
     }
 
-    private void SetSettingsTexture()
-    {
-        // PlaybackController.Instance.VideoPlayer.SetStaticTexture(
-        //     FileHelpers.LoadPNGFromResources("BeatSaberTheater.Resources.beat-saber-logo-landscape.png"));
-    }
-
     public override void DidActivate(bool firstActivation, bool addedToHierarchy, bool screenSystemEnabling)
     {
         base.DidActivate(firstActivation, addedToHierarchy, screenSystemEnabling);
-        if (!_config.PluginEnabled) return;
 
-        // PlaybackController.Instance.StopPlayback();
-        // PlaybackController.Instance.VideoPlayer.FadeIn(FADE_DURATION);
-        SetSettingsTexture();
-
-        // if (!_config.TransparencyEnabled) PlaybackController.Instance.VideoPlayer.ShowScreenBody();
+        // Values may have been changed in the Theater tab's Display view since this screen was built
+        _parserParams?.EmitEvent("refresh-values");
     }
 
     public override void DidDeactivate(bool removedFromHierarchy, bool screenSystemDisabling)

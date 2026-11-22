@@ -146,10 +146,10 @@ internal class PlaybackManagerPatchEventMapper : IInitializable, IDisposable
             Events.InvokeSceneTransitionEvents(_config, video);
             // _videoMenu.SetSelectedLevel(beatmapLevel);
 
-            if (!_config.PluginEnabled || _config.ForceDisableEnvironmentOverrides)
+            if (!_config.TheaterActive || _config.ForceDisableEnvironmentOverrides)
             {
                 _loggingService.Info(
-                    $"Cinema disabled: {!_config.PluginEnabled}, environment override force disabled: {_config.ForceDisableEnvironmentOverrides}");
+                    $"Cinema disabled: {!_config.TheaterActive}, environment override force disabled: {_config.ForceDisableEnvironmentOverrides}");
                 return;
             }
 

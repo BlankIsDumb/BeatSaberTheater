@@ -1,6 +1,7 @@
 ﻿using System.Runtime.CompilerServices;
 using BeatSaberTheater.Settings;
 using IPA.Config.Stores;
+using IPA.Config.Stores.Attributes;
 
 [assembly: InternalsVisibleTo(GeneratedStore.AssemblyVisibilityTarget)]
 
@@ -8,7 +9,17 @@ namespace BeatSaberTheater;
 
 public class PluginConfig
 {
-    public virtual bool PluginEnabled { get; set; } = true;
+    // Runtime state set by BSIPA enabling/disabling the plugin (Plugin.OnEnable/OnDisable). Not saved: it only
+    // describes this run, and saving it let another game process's shutdown switch Theater off in this one
+    // (IPA reloads the config file when it changes on disk).
+    [Ignore] public virtual bool PluginEnabled { get; set; } = true;
+
+    // The player's on/off switch (Display view in the Theater tab, main menu settings). Survives restarts.
+    public virtual bool TheaterEnabled { get; set; } = true;
+
+    // Whether Theater should play videos and modify environments right now
+    [Ignore] public bool TheaterActive => PluginEnabled && TheaterEnabled;
+
     public virtual bool OverrideEnvironment { get; set; } = true;
     public virtual bool DisableCustomPlatforms { get; set; } = true;
     public virtual bool Enable360Rotation { get; set; } = true;
@@ -18,6 +29,11 @@ public class PluginConfig
     public virtual bool CoverEnabled { get; set; }
     public virtual int BloomIntensity { get; set; } = 100;
     public virtual float CornerRoundness { get; set; }
+
+    // Display settings, in percent. See Settings/DisplaySettings.cs for ranges.
+    public virtual int ScreenBrightness { get; set; } = 100;
+    public virtual int ScreenScale { get; set; } = 100;
+    public virtual int EdgeSoftness { get; set; }
     public virtual VideoQuality.Mode QualityMode { get; set; } = VideoQuality.Mode.Q720P;
     public virtual VideoFormats.Format Format { get; set; } = VideoFormats.Format.Mp4;
     public virtual bool ForceDisableEnvironmentOverrides { get; set; } = false;

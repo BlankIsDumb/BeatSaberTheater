@@ -16,7 +16,6 @@ namespace BeatSaberTheater.Services;
 
 public class YtDlpUpdateService : IInitializable
 {
-    private readonly PluginConfig _config;
     private readonly LoggingService _loggingService;
 
     public string YtDlpPath => TheaterYtDlpPath;
@@ -24,9 +23,10 @@ public class YtDlpUpdateService : IInitializable
 
     private string TheaterYtDlpPath => Path.Combine(TheaterFileHelpers.TheaterLibsPath, "yt-dlp.exe");
 
-    internal YtDlpUpdateService(PluginConfig config, LoggingService loggingService)
+    // Failures here only affect downloading: missing or broken libraries make LibrariesAvailable() false.
+    // They no longer switch Theater off, so videos that are already downloaded keep playing (e.g. when offline).
+    internal YtDlpUpdateService(LoggingService loggingService)
     {
-        _config = config;
         _loggingService = loggingService;
     }
 
@@ -144,7 +144,6 @@ public class YtDlpUpdateService : IInitializable
             if (exeAsset == null)
             {
                 _loggingService.Error($"Could not find yt-dlp.exe in release file manifest from retrieved latest GitHub version");
-                _config.PluginEnabled = false;
                 return;
             }
 
@@ -152,7 +151,6 @@ public class YtDlpUpdateService : IInitializable
             if (downloadUrl == null)
             {
                 _loggingService.Error($"Could not find download URL for latest yt-dlp.exe version from GitHub");
-                _config.PluginEnabled = false;
                 return;
             }
 
@@ -175,7 +173,6 @@ public class YtDlpUpdateService : IInitializable
         catch (Exception ex)
         {
             _loggingService.Error($"Error downloading yt-dlp: {ex}");
-            _config.PluginEnabled = false;
         }
     }
 
@@ -229,9 +226,8 @@ public class YtDlpUpdateService : IInitializable
 
         if (!IsFfmpegWorking(theaterFfmpegPath))
         {
-            _loggingService.Error("ffmpeg.exe was copied from the base library path but is not working. Disabling plugin");
+            _loggingService.Error("ffmpeg.exe was copied from the base library path but is not working. Downloads will not work");
             File.Delete(theaterFfmpegPath);
-            _config.PluginEnabled = false;
             return;
         }
 
@@ -266,7 +262,6 @@ public class YtDlpUpdateService : IInitializable
         catch (Exception ex)
         {
             _loggingService.Error($"Error during update check: {ex}");
-            _config.PluginEnabled = false;
         }
     }
 
@@ -351,7 +346,6 @@ public class YtDlpUpdateService : IInitializable
         catch (Exception ex)
         {
             _loggingService.Error($"Error downloading deno: {ex}");
-            _config.PluginEnabled = false;
         }
     }
 }

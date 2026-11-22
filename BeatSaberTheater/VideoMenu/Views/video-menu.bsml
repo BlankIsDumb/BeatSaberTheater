@@ -5,17 +5,28 @@
         <vertical align='Center' vertical-fit='PreferredSize' child-expand-height='false'>
             <text id='no-video-text' align='Center' text="No video configured"></text>
             <button id='search-button' text='Search' on-click='on-search-action'/>
+            <button id='turn-on-button' text='Turn on Theater' on-click='on-turn-on-action' active='false'/>
         </vertical>
     </bg>
     <bg id='video-details'>
         <vertical child-expand-height="false" spacing="0" vertical-fit="PreferredSize" pad-top="-3" align="top">
-            <horizontal preferred-width='100' horizontal-fit='PreferredSize' align="Center">
-                <text id='video-title' font-size='5' align='Center' overflow-mode='Ellipsis' preferred-width='90'
+            <horizontal preferred-width='116' horizontal-fit='PreferredSize' align="Center"
+                        child-expand-width='false'>
+                <text id='video-title' font-size='5' align='Center' overflow-mode='Ellipsis' preferred-width='82'
                       text='Video Title'></text>
-                <button-with-icon id='delete-config-button' icon='BeatSaberTheater.Resources.trash.png' align='Right'
-                                  text=' ' horizontal-fit='PreferredSize' vertical-fit='PreferredSize'
-                                  hover-hint='Delete video configuration&#xD;&#xA;&#xD;&#xA;(will also delete the video if downloaded)'
-                                  on-click='on-delete-config-action'/>
+                <!-- Icon buttons, scaled to half size as one group from its right edge (VideoMenuUI.Initialize).
+                     The 34-unit slot fits two ~28-unit buttons at half size; they overflow leftwards before scaling. -->
+                <horizontal id='title-buttons' preferred-width='34' min-width='34' spacing='0' child-align='MiddleRight'
+                            child-control-width='false' child-control-height='false'
+                            child-expand-width='false' child-expand-height='false'>
+                    <button-with-icon id='display-settings-button' icon='BeatSaberTheater.Resources.gear.png'
+                                      text=' ' horizontal-fit='PreferredSize' vertical-fit='PreferredSize'
+                                      hover-hint='Display settings' on-click='on-display-settings-action'/>
+                    <button-with-icon id='delete-config-button' icon='BeatSaberTheater.Resources.trash.png'
+                                      text=' ' horizontal-fit='PreferredSize' vertical-fit='PreferredSize'
+                                      hover-hint='Delete video configuration&#xD;&#xA;&#xD;&#xA;(will also delete the video if downloaded)'
+                                      on-click='on-delete-config-action'/>
+                </horizontal>
             </horizontal>
 
             <horizontal horizontal-fit='PreferredSize' vertical-fit='PreferredSize' width='50' height='25'
@@ -87,6 +98,40 @@
             <button text='Go Back' on-click='on-back-action' pad-right="7"/>
             <button id='download-button' text='Download' on-click='on-download-action'/>
             <button id='refine-button' text='Refine Search' on-click='on-refine-action'/>
+        </horizontal>
+    </bg>
+
+    <!-- Ranges must match Settings/DisplaySettings.cs. Descriptions: Settings/SettingDescriptions.cs, shown in the
+         black popup at the bottom of this view (HoverPopup) instead of the game's white hover-hint bubble. -->
+    <bg id='display-settings-view' active='false'>
+        <vertical child-expand-height='false' spacing='1' vertical-fit='PreferredSize' pad-top='-3' align='top'>
+            <text text='Display settings' font-size='5' align='Center'/>
+            <modifier-container child-expand-width='true' horizontal-fit='PreferredSize'>
+                <bool-setting id='display-enabled-setting' text='Theater enabled' value='display-theater-enabled'
+                              apply-on-change='true' get-event='refresh-display-values'/>
+                <slider-setting id='display-brightness-setting' text='Brightness' value='display-brightness'
+                                min='10' max='100' increment='5' integer-only='true' apply-on-change='true'
+                                formatter='format-percent' get-event='refresh-display-values'/>
+                <slider-setting id='display-size-setting' text='Screen size' value='display-screen-size'
+                                min='25' max='300' increment='5' integer-only='true' apply-on-change='true'
+                                formatter='format-percent' get-event='refresh-display-values'/>
+                <slider-setting id='display-corner-setting' text='Corner roundness' value='display-corner-roundness'
+                                min='0' max='100' increment='1' integer-only='true' apply-on-change='true'
+                                get-event='refresh-display-values'/>
+                <slider-setting id='display-edge-setting' text='Edge softness' value='display-edge-softness'
+                                min='0' max='100' increment='5' integer-only='true' apply-on-change='true'
+                                formatter='format-percent' get-event='refresh-display-values'/>
+                <slider-setting id='display-bloom-setting' text='Bloom' value='display-bloom'
+                                min='0' max='150' increment='10' integer-only='true' apply-on-change='true'
+                                formatter='format-percent' get-event='refresh-display-values'/>
+            </modifier-container>
+            <button text='Back' on-click='on-display-settings-back-action'/>
+        </vertical>
+        <!-- Last child, so it draws over the settings. Placed above the pointed-at setting in code. -->
+        <horizontal id='display-popup' active='false' bg='round-rect-panel' bg-color='#000000' bg-alpha='0.8'
+                    pad-left='2' pad-right='2' pad-top='1' pad-bottom='1'
+                    horizontal-fit='PreferredSize' vertical-fit='PreferredSize'>
+            <text id='display-popup-text' text=' ' font-size='3.4' align='Center'/>
         </horizontal>
     </bg>
 </bg>

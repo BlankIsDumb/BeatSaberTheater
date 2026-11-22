@@ -31,7 +31,7 @@ public static class Events
 
     internal static void InvokeSceneTransitionEvents(PluginConfig config, VideoConfig? videoConfig)
     {
-        if (!config.PluginEnabled || videoConfig == null)
+        if (!config.TheaterActive || videoConfig == null)
         {
             TheaterActivated?.Invoke(false);
             AllowCustomPlatform?.Invoke(true);

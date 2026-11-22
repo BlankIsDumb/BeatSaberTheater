@@ -8,6 +8,7 @@ using BeatSaberTheater.Download;
 using BeatSaberTheater.Environment.Interfaces;
 using BeatSaberTheater.Screen;
 using BeatSaberTheater.Screen.Interfaces;
+using BeatSaberTheater.Settings;
 using BeatSaberTheater.Util;
 using BeatSaberTheater.Video;
 using BeatSaberTheater.Video.Config;
@@ -47,6 +48,7 @@ public class PlaybackManager : MonoBehaviour
     private CustomVideoPlayer _videoPlayer = null!;
 
     [Inject] private readonly PluginConfig _config = null!;
+    [Inject] private readonly DisplaySettings _displaySettings = null!;
     [Inject] private readonly ILightManagerFactory _lightManagerFactory = null!;
     [Inject] private readonly LoggingService _loggingService = null!;
     [Inject] private readonly VideoLoader _videoLoader = null!;
@@ -66,6 +68,8 @@ public class PlaybackManager : MonoBehaviour
         BSEvents.songUnpaused += ResumeVideo;
         VideoLoader.ConfigChanged += OnConfigChanged;
         Events.DifficultySelected += DifficultySelected;
+        _displaySettings.Changed += OnDisplaySettingsChanged;
+        _displaySettings.TheaterEnabledChanged += OnTheaterEnabledChanged;
     }
 
     private void OnDestroy()
@@ -81,6 +85,32 @@ public class PlaybackManager : MonoBehaviour
         BSEvents.songUnpaused -= ResumeVideo;
         VideoLoader.ConfigChanged -= OnConfigChanged;
         Events.DifficultySelected -= DifficultySelected;
+        _displaySettings.Changed -= OnDisplaySettingsChanged;
+        _displaySettings.TheaterEnabledChanged -= OnTheaterEnabledChanged;
+    }
+
+    #endregion
+
+    #region Display settings
+
+    // Brightness, corner roundness and edge softness apply to the screen right away. Screen size applies the next
+    // time the gameplay placement is set, and bloom is read every frame.
+    private void OnDisplaySettingsChanged()
+    {
+        if (_videoPlayer == null) return;
+
+        _videoPlayer.RefreshBrightness();
+        _videoPlayer.SetScreenShaderParameters(_videoConfig);
+    }
+
+    private void OnTheaterEnabledChanged(bool enabled)
+    {
+        // Turning Theater back on is handled by the video menu, which reloads the selected level
+        if (enabled || _videoPlayer == null) return;
+
+        StopPreview(true);
+        StopPlayback();
+        _videoPlayer.Hide();
     }
 
     #endregion
@@ -235,7 +265,7 @@ public class PlaybackManager : MonoBehaviour
 
         _activeScene = Scene.SoloGameplay;
 
-        if (!_config.PluginEnabled)
+        if (!_config.TheaterActive)
         {
             _loggingService.Info("Plugin disabled");
             _videoPlayer.Hide();
@@ -676,7 +706,7 @@ public class PlaybackManager : MonoBehaviour
 
     public void ResumeVideo()
     {
-        if (!_config.PluginEnabled || _videoPlayer.IsPlaying || _videoConfig == null || !_videoConfig.IsPlayable ||
+        if (!_config.TheaterActive || _videoPlayer.IsPlaying || _videoConfig == null || !_videoConfig.IsPlayable ||
             (_videoPlayer.VideoEnded && _videoConfig.loop != true)) return;
 
         var referenceTime = GetReferenceTime();
@@ -914,7 +944,7 @@ public class PlaybackManager : MonoBehaviour
 
     private void StartSongPreview()
     {
-        if (!_config.PluginEnabled || _videoConfig is not { IsPlayable: true }) return;
+        if (!_config.TheaterActive || _videoConfig is not { IsPlayable: true }) return;
 
         if (_previewWaitingForPreviewPlayer || _previewWaitingForVideoPlayer || IsPreviewPlaying) return;
 
@@ -1038,8 +1068,9 @@ public class PlaybackManager : MonoBehaviour
 
     public void UpdateVideoPlayerPlacement(VideoConfig config, Scene scene)
     {
-        _videoPlayer.SetPlacement(
-            Placement.CreatePlacementForConfig(config, scene, _videoPlayer.GetVideoAspectRatio()));
+        var placement = Placement.CreatePlacementForConfig(config, scene, _videoPlayer.GetVideoAspectRatio());
+        if (scene == Scene.SoloGameplay) placement.ApplyUserScale(_displaySettings.ScreenScale / 100f);
+        _videoPlayer.SetPlacement(placement);
     }
 
     public void SetVideoPlayerSoftParent(Transform transform)

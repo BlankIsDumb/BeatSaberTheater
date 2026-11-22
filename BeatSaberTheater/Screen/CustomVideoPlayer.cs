@@ -31,7 +31,10 @@ public class CustomVideoPlayer : MonoBehaviour
     private const string THEATER_TEXTURE_NAME = "_CinemaVideoTexture";
     private const string STATUS_PROPERTY_NAME = "_CinemaVideoIsPlaying";
     private const float MAX_BRIGHTNESS = 0.92f;
-    private readonly Color _screenColorOn = Color.white.ColorWithAlpha(0f) * MAX_BRIGHTNESS;
+    // Full screen colour at fade value 1, scaled by the player's brightness setting. Fades, the light cast by the screen
+    // and the bloom pre-pass all use this colour, so they dim along with it.
+    private Color ScreenColorOn =>
+        Color.white.ColorWithAlpha(0f) * (MAX_BRIGHTNESS * Mathf.Clamp(_config.ScreenBrightness, 0, 100) / 100f);
     private readonly Color _screenColorOff = Color.clear;
     private static int? _mainTex;
     private static int MainTex => _mainTex ??= Shader.PropertyToID(MAIN_TEXTURE_NAME);
@@ -258,7 +261,7 @@ public class CustomVideoPlayer : MonoBehaviour
 
     public void FadeHandlerUpdate(float value)
     {
-        ScreenColor = _screenColorOn * value;
+        ScreenColor = ScreenColorOn * value;
         if (!_muted) Volume = MAX_VOLUME * _volumeScale * value;
 
         if (value >= 1 && _bodyVisible)
@@ -298,6 +301,13 @@ public class CustomVideoPlayer : MonoBehaviour
         _firstFrameStopwatch.Reset();
         _screenManager.SetAspectRatio(GetVideoAspectRatio());
         _player.frameReady -= FirstFrameReady;
+    }
+
+    // Re-applies the brightness setting at the current fade value, e.g. while a slider is being dragged
+    public void RefreshBrightness()
+    {
+        if (_screenRenderer == null) return;
+        ScreenColor = ScreenColorOn * _easingHandler.Value;
     }
 
     public void SetBrightness(float brightness)

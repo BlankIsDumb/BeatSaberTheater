@@ -31,8 +31,9 @@ public class CustomBloomPrePass : MonoBehaviour
     private float? _bloomIntensityConfigSetting;
     private Vector2 _screenDimensions;
 
+    // A map's own bloom value scales the player's setting instead of replacing it, so 0 always turns bloom off
     private float BloomIntensity =>
-        Mathf.Clamp(_bloomIntensityConfigSetting ?? _config.BloomIntensity / 100f, 0f, 2f);
+        Mathf.Clamp((_bloomIntensityConfigSetting ?? 1f) * _config.BloomIntensity / 100f, 0f, 2f);
 
     private void Start()
     {

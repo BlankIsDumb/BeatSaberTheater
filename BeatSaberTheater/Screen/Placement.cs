@@ -47,6 +47,26 @@ public class Placement
         Curvature = curvature;
     }
 
+    /// <summary>
+    /// Applies the player's screen size setting. Smaller screens shrink around their centre, so they stay above the
+    /// note path. Bigger screens grow upward from their bottom edge, because the default gameplay screen's bottom edge
+    /// sits at floor level and growing around the centre would push part of the video under the floor.
+    /// </summary>
+    public void ApplyUserScale(float scale)
+    {
+        if (Mathf.Approximately(scale, 1f) || scale <= 0f) return;
+
+        var oldHeight = Height;
+        Height *= scale;
+        Width *= scale;
+
+        if (scale > 1f)
+        {
+            var screenUp = Quaternion.Euler(Rotation) * Vector3.up;
+            Position += screenUp * ((Height - oldHeight) / 2f);
+        }
+    }
+
     public static Placement CreatePlacementForConfig(VideoConfig? config, Scene scene,
         float aspectRatio)
     {

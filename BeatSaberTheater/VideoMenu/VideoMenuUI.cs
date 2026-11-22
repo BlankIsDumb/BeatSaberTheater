@@ -59,6 +59,17 @@ public class VideoMenuUI : IInitializable, IDisposable
     [UIComponent("delete-video-button")] private readonly TextMeshProUGUI _deleteVideoButtonText = null!;
     [UIComponent("download-button")] private readonly Button _downloadButton = null!;
     [UIComponent("revert-offset-button")] private readonly Button _revertOffsetButton = null!;
+    [UIObject("title-buttons")] private readonly GameObject _titleButtons = null!;
+    [UIComponent("display-settings-view")] private readonly RectTransform _displaySettingsViewRect = null!;
+    [UIComponent("display-popup")] private readonly RectTransform _displayPopupRect = null!;
+    [UIComponent("display-popup-text")] private readonly TextMeshProUGUI _displayPopupText = null!;
+    [UIObject("display-enabled-setting")] private readonly GameObject _displayEnabledSetting = null!;
+    [UIObject("display-brightness-setting")] private readonly GameObject _displayBrightnessSetting = null!;
+    [UIObject("display-size-setting")] private readonly GameObject _displaySizeSetting = null!;
+    [UIObject("display-corner-setting")] private readonly GameObject _displayCornerSetting = null!;
+    [UIObject("display-edge-setting")] private readonly GameObject _displayEdgeSetting = null!;
+    [UIObject("display-bloom-setting")] private readonly GameObject _displayBloomSetting = null!;
+    [UIComponent("turn-on-button")] private readonly Button _turnOnButton = null!;
     [UIObject("offset-controls")] private readonly GameObject _offsetControls = null!;
     [UIObject("customize-offset-toggle")] private readonly GameObject _customizeOffsetToggle = null!;
     [UIParams] private readonly BSMLParserParams _bsmlParserParams = null!;
@@ -100,19 +111,24 @@ public class VideoMenuUI : IInitializable, IDisposable
 
     private string? _thumbnailURL;
 
+    private bool _displaySettingsOpen;
+    private HoverPopup? _displayPopup;
+
     private readonly TheaterCoroutineStarter _coroutineStarter;
+    private readonly DisplaySettings _displaySettings;
     private readonly DownloadService _downloadService;
     private readonly SearchService _searchService;
     private readonly VideoLoader _videoLoader;
 
     private readonly List<YTResult> _searchResults = [];
 
-    internal VideoMenuUI(TheaterCoroutineStarter coroutineStarter, DownloadService downloadService,
-        GameplaySetup gameplaySetup, LoggingService loggingService, PlaybackManager playbackManager,
-        PluginConfig config, SearchService searchService, VideoLoader videoLoader)
+    internal VideoMenuUI(TheaterCoroutineStarter coroutineStarter, DisplaySettings displaySettings,
+        DownloadService downloadService, GameplaySetup gameplaySetup, LoggingService loggingService,
+        PlaybackManager playbackManager, PluginConfig config, SearchService searchService, VideoLoader videoLoader)
     {
         _config = config;
         _coroutineStarter = coroutineStarter;
+        _displaySettings = displaySettings;
         _downloadService = downloadService;
         _gameplaySetup = gameplaySetup;
         _loggingService = loggingService;
@@ -144,7 +160,19 @@ public class VideoMenuUI : IInitializable, IDisposable
         _levelDetailMenu.Initialize();
         _levelDetailMenu.ButtonPressedAction += OnDeleteVideoAction;
         CreateStatusListener();
-        _deleteButton.transform.localScale *= 0.5f;
+        // Shrink the gear and trash buttons together, anchored at the right edge, so they sit side by side in the
+        // corner. Scaling each button on its own left half-empty slots between them.
+        var titleButtons = (RectTransform)_titleButtons.transform;
+        titleButtons.pivot = new Vector2(1f, 0.5f);
+        titleButtons.localScale = new Vector3(0.5f, 0.5f, 1f);
+
+        _displayPopup = new HoverPopup(_displayPopupRect, _displayPopupText);
+        HoverDescription.Attach(_displayEnabledSetting, SettingDescriptions.TheaterEnabled, _displayPopup);
+        HoverDescription.Attach(_displayBrightnessSetting, SettingDescriptions.Brightness, _displayPopup);
+        HoverDescription.Attach(_displaySizeSetting, SettingDescriptions.ScreenSize, _displayPopup);
+        HoverDescription.Attach(_displayCornerSetting, SettingDescriptions.CornerRoundness, _displayPopup);
+        HoverDescription.Attach(_displayEdgeSetting, SettingDescriptions.EdgeSoftness, _displayPopup);
+        HoverDescription.Attach(_displayBloomSetting, SettingDescriptions.Bloom, _displayPopup);
 
         _searchKeyboard.ClearOnOpen = false;
 
@@ -159,6 +187,7 @@ public class VideoMenuUI : IInitializable, IDisposable
         _downloadService.DownloadProgress += OnDownloadProgress;
         _downloadService.DownloadFinished += OnDownloadFinished;
         VideoLoader.ConfigChanged += OnConfigChanged;
+        _displaySettings.TheaterEnabledChanged += OnTheaterEnabledChanged;
 
         if (!_downloadService.LibrariesAvailable())
             _loggingService.Warn(
@@ -168,6 +197,7 @@ public class VideoMenuUI : IInitializable, IDisposable
     public void Dispose()
     {
         _gameplaySetup.RemoveTab("Theater");
+        _displaySettings.TheaterEnabledChanged -= OnTheaterEnabledChanged;
     }
 
     public void CreateStatusListener()
@@ -192,6 +222,16 @@ public class VideoMenuUI : IInitializable, IDisposable
         _noVideoViewRect.gameObject.SetActive(true);
         _videoDetailsViewRect.gameObject.SetActive(false);
         SetButtonState(false);
+        _turnOnButton.gameObject.SetActive(false);
+
+        // Checked before the libraries so there's always a way to turn Theater back on from here
+        if (!_config.TheaterEnabled)
+        {
+            _noVideoText.text = "Theater is turned off.";
+            _searchButton.gameObject.SetActive(false);
+            _turnOnButton.gameObject.SetActive(true);
+            return;
+        }
 
         if (!_downloadService.LibrariesAvailable())
         {
@@ -201,9 +241,10 @@ public class VideoMenuUI : IInitializable, IDisposable
             return;
         }
 
-        if (!_config.PluginEnabled)
+        if (!_config.TheaterActive)
         {
-            _noVideoText.text = "Theater is disabled.\r\nYou can re-enable it on the left side of the main menu.";
+            _noVideoText.text = "Theater is disabled in the mod list.";
+            _searchButton.gameObject.SetActive(false);
             return;
         }
 
@@ -288,10 +329,13 @@ public class VideoMenuUI : IInitializable, IDisposable
             return;
         }
 
+        // The Display view stays up until its Back button is pressed; it re-runs this when it closes
+        if (_displaySettingsOpen) return;
+
         _videoSearchResultsViewRect.gameObject.SetActive(false);
         _levelDetailMenu?.SetActive(false);
 
-        if (_currentVideo == null || !_downloadService.LibrariesAvailable())
+        if (_currentVideo == null || !_config.TheaterActive || !_downloadService.LibrariesAvailable())
         {
             ResetVideoMenu();
             _loggingService.Debug("No video configured");
@@ -532,7 +576,7 @@ public class VideoMenuUI : IInitializable, IDisposable
 
     public void HandleDidSelectEditorBeatmap(BeatmapDataModel beatmapData, string originalPath)
     {
-        if (_config.PluginEnabled) return;
+        if (!_config.TheaterActive) return;
 
         _playbackManager.StopPreview(true);
         if (_currentVideo?.NeedsToSave == true) _videoLoader.SaveVideoConfig(_currentVideo);
@@ -548,14 +592,21 @@ public class VideoMenuUI : IInitializable, IDisposable
         _extraSongData = null;
         _difficultyData = null;
 
-        if (!_config.PluginEnabled ||
-            (_currentLevel == level &&
-             _currentLevelIsPlaylistSong)) //Ignores the duplicate event that occurs when selecting a playlist song
-            return;
+        //Ignores the duplicate event that occurs when selecting a playlist song
+        if (_currentLevel == level && _currentLevelIsPlaylistSong) return;
 
         _currentLevelIsPlaylistSong = InstalledMods.BeatSaberPlaylistsLib && level.IsPlaylistLevel();
         if (InstalledMods.BeatSaberPlaylistsLib && _currentLevelIsPlaylistSong)
             level = level.GetLevelFromPlaylistIfAvailable();
+
+        if (!_config.TheaterActive)
+        {
+            // Keep track of the selection so turning Theater back on can load it
+            if (_currentVideo?.NeedsToSave == true) _videoLoader.SaveVideoConfig(_currentVideo);
+            _currentLevel = level;
+            _currentVideo = null;
+            return;
+        }
 
         _playbackManager.StopPreview(true);
 
@@ -620,6 +671,7 @@ public class VideoMenuUI : IInitializable, IDisposable
     public void StatusViewerDidDisable(object sender, EventArgs e)
     {
         _videoMenuActive = false;
+        CloseDisplaySettings(false);
         if (_currentVideo?.NeedsToSave == true) _videoLoader.SaveVideoConfig(_currentVideo);
 
         _searchService.StopSearch();
@@ -966,6 +1018,114 @@ public class VideoMenuUI : IInitializable, IDisposable
         _currentVideo.userSettings = null;
         ChangeOffset(originalOffset.Value - _currentVideo.offset);
     }
+
+    #region Display view
+
+    [UIValue("display-theater-enabled")]
+    public bool DisplayTheaterEnabled
+    {
+        get => _displaySettings.TheaterEnabled;
+        set => _displaySettings.TheaterEnabled = value;
+    }
+
+    [UIValue("display-brightness")]
+    public int DisplayBrightness
+    {
+        get => _displaySettings.Brightness;
+        set => _displaySettings.Brightness = value;
+    }
+
+    [UIValue("display-screen-size")]
+    public int DisplayScreenSize
+    {
+        get => _displaySettings.ScreenScale;
+        set => _displaySettings.ScreenScale = value;
+    }
+
+    [UIValue("display-corner-roundness")]
+    public int DisplayCornerRoundness
+    {
+        get => _displaySettings.CornerRoundness;
+        set => _displaySettings.CornerRoundness = value;
+    }
+
+    [UIValue("display-edge-softness")]
+    public int DisplayEdgeSoftness
+    {
+        get => _displaySettings.EdgeSoftness;
+        set => _displaySettings.EdgeSoftness = value;
+    }
+
+    [UIValue("display-bloom")]
+    public int DisplayBloom
+    {
+        get => _displaySettings.Bloom;
+        set => _displaySettings.Bloom = value;
+    }
+
+    [UIAction("format-percent")]
+    [UsedImplicitly]
+    private string FormatPercent(object value)
+    {
+        return DisplaySettings.FormatPercent(value);
+    }
+
+    [UIAction("on-display-settings-action")]
+    [UsedImplicitly]
+    private void OnDisplaySettingsAction()
+    {
+        // The video keeps playing behind this view, so slider changes can be judged live
+        _displaySettingsOpen = true;
+        _bsmlParserParams.EmitEvent("hide-keyboard");
+        _noVideoViewRect.gameObject.SetActive(false);
+        _videoDetailsViewRect.gameObject.SetActive(false);
+        _videoSearchResultsViewRect.gameObject.SetActive(false);
+        _displaySettingsViewRect.gameObject.SetActive(true);
+        _displayPopup?.Hide();
+        _bsmlParserParams.EmitEvent("refresh-display-values");
+    }
+
+    [UIAction("on-display-settings-back-action")]
+    [UsedImplicitly]
+    private void OnDisplaySettingsBackAction()
+    {
+        CloseDisplaySettings(true);
+    }
+
+    private void CloseDisplaySettings(bool refreshMenu)
+    {
+        if (!_displaySettingsOpen) return;
+
+        _displaySettingsOpen = false;
+        _displaySettingsViewRect.gameObject.SetActive(false);
+        if (refreshMenu) SetupVideoDetails();
+    }
+
+    [UIAction("on-turn-on-action")]
+    [UsedImplicitly]
+    private void OnTurnOnAction()
+    {
+        _displaySettings.TheaterEnabled = true;
+    }
+
+    private void OnTheaterEnabledChanged(bool enabled)
+    {
+        if (enabled)
+        {
+            // Load the selected level again, now that Theater is on
+            var level = _currentLevel;
+            _currentLevel = null;
+            _currentLevelIsPlaylistSong = false;
+            HandleDidSelectLevel(level);
+            return;
+        }
+
+        if (_currentVideo?.NeedsToSave == true) _videoLoader.SaveVideoConfig(_currentVideo);
+        _currentVideo = null;
+        SetupVideoDetails();
+    }
+
+    #endregion
 
     [UIAction("on-offset-decrease-action-high")]
     [UsedImplicitly]

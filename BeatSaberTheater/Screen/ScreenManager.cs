@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using BeatSaberTheater.Models;
 using BeatSaberTheater.Screen.Interfaces;
+using BeatSaberTheater.Settings;
 using BeatSaberTheater.Util;
 using BeatSaberTheater.Video.Config;
 using UnityEngine;
@@ -292,10 +293,15 @@ public class ScreenManager : IInitializable
                 materialPropertyBlock = _materialPropertyBlock;
             }
 
+            // The player's corner roundness and edge softness only apply when the map's config has no vignette
             var elliptical = _config.CornerRoundness > 0 && vignette == null;
             SetShaderFloat(VignetteRadius, vignette?.radius, 0f, 1f,
                 elliptical ? 1 - _config.CornerRoundness : 1f);
-            SetShaderFloat(VignetteSoftness, vignette?.softness, 0f, 1f, elliptical ? 0.02f : 0.005f);
+            var defaultSoftness = elliptical ? 0.02f : 0.005f;
+            var userSoftness = defaultSoftness + (DisplaySettings.MaxVignetteSoftness - defaultSoftness) *
+                Mathf.Clamp(_config.EdgeSoftness, 0, DisplaySettings.MaxEdgeSoftness) /
+                DisplaySettings.MaxEdgeSoftness;
+            SetShaderFloat(VignetteSoftness, vignette?.softness, 0f, 1f, userSoftness);
             materialPropertyBlock!.SetInt(VignetteElliptical,
                 vignette?.type == "oval" || vignette?.type == "elliptical" || vignette?.type == "ellipse" ||
                 (vignette?.type == null && elliptical)
