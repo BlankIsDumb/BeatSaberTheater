@@ -43,6 +43,8 @@ public class PlaybackManager : MonoBehaviour
     private bool _previewWaitingForVideoPlayer = true;
     private SettingsManager? _settingsManager;
     private SongPreviewPlayer? _songPreviewPlayer;
+    private float _songSpeed = 1f;
+    private bool _speedPendingFirstFrame;
     private AudioTimeSyncController? _timeSyncController;
     private VideoConfig? _videoConfig;
     private CustomVideoPlayer _videoPlayer = null!;
@@ -119,6 +121,9 @@ public class PlaybackManager : MonoBehaviour
     {
         _videoPlayer.Stop();
         StopAllCoroutines();
+        // A slow-speed start that never reached its first frame shouldn't switch the speed of whatever plays next
+        _videoPlayer.RemoveFrameReadyEventHandler(ApplySpeedOnFirstFrame);
+        _speedPendingFirstFrame = false;
     }
 
     public void StopAndUnloadVideo()
@@ -421,7 +426,7 @@ public class PlaybackManager : MonoBehaviour
     {
         if (_offsetAfterPrepare > 0)
         {
-            var offset = (DateTime.Now - _audioSourceStartTime).TotalSeconds + _offsetAfterPrepare;
+            var offset = (DateTime.Now - _audioSourceStartTime).TotalSeconds * TargetVideoSpeed + _offsetAfterPrepare;
             _loggingService.Info($"Adjusting offset after prepare to {offset}");
             player.time = offset;
         }
@@ -504,6 +509,10 @@ public class PlaybackManager : MonoBehaviour
 
     #region Video Playback
 
+    private float TargetVideoSpeed => _songSpeed * (_videoConfig?.PlaybackSpeed ?? 1f);
+
+    private float VideoToRealSeconds(float videoSeconds) => videoSeconds / Math.Max(0.01f, TargetVideoSpeed);
+
     private void PlayVideo(float startTime)
     {
         if (_videoConfig == null)
@@ -520,30 +529,31 @@ public class PlaybackManager : MonoBehaviour
         else
             _videoPlayer.HideScreenBody();
 
-        var totalOffset = _videoConfig.GetOffsetInSec();
-        var songSpeed = 1f;
-        if (BS_Utils.Plugin.LevelData.IsSet)
+        _songSpeed = 1f;
+        if (_activeScene != Scene.Menu && BS_Utils.Plugin.LevelData.IsSet)
         {
-            songSpeed = BS_Utils.Plugin.LevelData.GameplayCoreSceneSetupData.gameplayModifiers.songSpeedMul;
+            _songSpeed = BS_Utils.Plugin.LevelData.GameplayCoreSceneSetupData.gameplayModifiers.songSpeedMul;
 
             if (BS_Utils.Plugin.LevelData.GameplayCoreSceneSetupData?.practiceSettings != null)
-            {
-                songSpeed = BS_Utils.Plugin.LevelData.GameplayCoreSceneSetupData.practiceSettings.songSpeedMul;
-                if (totalOffset + startTime < 0) totalOffset /= songSpeed * _videoConfig.PlaybackSpeed;
-            }
+                _songSpeed = BS_Utils.Plugin.LevelData.GameplayCoreSceneSetupData.practiceSettings.songSpeedMul;
         }
 
-        _videoPlayer.PlaybackSpeed = songSpeed * _videoConfig.PlaybackSpeed;
-        totalOffset += startTime; // This must happen after song speed adjustment
+        var totalOffset = startTime * _videoConfig.PlaybackSpeed + _videoConfig.GetOffsetInSec();
 
-        if (songSpeed * _videoConfig.PlaybackSpeed < 1f && totalOffset > 0f)
+        // Cinema blocked starts below 1x at a positive video position because Unity 2019 could crash.
+        // The game now runs Unity 2022.3. Starting at 1x and switching on the first frame avoids that start condition.
+        if (TargetVideoSpeed < 1f)
         {
-            // Unity crashes if the playback speed is less than 1 and the video time at the start of playback is greater than 0
-            _loggingService.Warn("Video playback disabled to prevent Unity crash");
-            _videoPlayer.Hide();
-            StopPlayback();
-            _videoConfig = null;
-            return;
+            _videoPlayer.PlaybackSpeed = 1f;
+            _speedPendingFirstFrame = true;
+            _videoPlayer.RemoveFrameReadyEventHandler(ApplySpeedOnFirstFrame);
+            _videoPlayer.AddFrameReadyEventHandler(ApplySpeedOnFirstFrame);
+            _loggingService.Info($"Starting video at 1x, switching to {TargetVideoSpeed:0.00}x on its first frame");
+        }
+        else
+        {
+            _videoPlayer.PlaybackSpeed = TargetVideoSpeed;
+            _speedPendingFirstFrame = false;
         }
 
         // Video seemingly always lags behind. A fixed offset seems to work well enough
@@ -563,7 +573,7 @@ public class PlaybackManager : MonoBehaviour
         }
 
         _loggingService.Debug(
-            $"Total offset: {totalOffset}, startTime: {startTime}, songSpeed: {songSpeed}, player time: {_videoPlayer.PlayerTime}");
+            $"Total offset: {totalOffset}, startTime: {startTime}, songSpeed: {_songSpeed}, PlaybackSpeed: {_videoConfig.PlaybackSpeed}, player time: {_videoPlayer.PlayerTime}");
 
         StopAllCoroutines();
 
@@ -573,8 +583,8 @@ public class PlaybackManager : MonoBehaviour
         if (totalOffset < 0)
         {
             if (!IsPreviewPlaying)
-                // Negate the offset to turn it into a positive delay
-                StartCoroutine(PlayVideoDelayedCoroutine(-totalOffset));
+                // Wait in real time until the video clock would reach zero.
+                StartCoroutine(PlayVideoDelayedCoroutine(VideoToRealSeconds(-totalOffset)));
             else
                 // In menus we don't need to wait, instead the preview player starts earlier
                 _videoPlayer.Play();
@@ -592,6 +602,13 @@ public class PlaybackManager : MonoBehaviour
                 _videoPlayer.PlayerTime = totalOffset;
             }
         }
+    }
+
+    private void ApplySpeedOnFirstFrame(VideoPlayer player, long frame)
+    {
+        _videoPlayer.RemoveFrameReadyEventHandler(ApplySpeedOnFirstFrame);
+        _speedPendingFirstFrame = false;
+        _videoPlayer.PlaybackSpeed = TargetVideoSpeed;
     }
 
     // TODO: Using a stopwatch will not work properly when seeking in the map (e.g. IntroSkip, PracticePlugin)
@@ -713,7 +730,7 @@ public class PlaybackManager : MonoBehaviour
         if (referenceTime > 0)
             _videoPlayer.Play();
         else if (_playbackDelayStopwatch is { IsRunning: false })
-            StartCoroutine(PlayVideoDelayedCoroutine(-referenceTime));
+            StartCoroutine(PlayVideoDelayedCoroutine(VideoToRealSeconds(-referenceTime)));
     }
 
     public void ResyncVideo(float? referenceTime = null)
@@ -730,7 +747,7 @@ public class PlaybackManager : MonoBehaviour
         {
             _videoPlayer.Hide();
             StopAllCoroutines();
-            StartCoroutine(PlayVideoDelayedCoroutine(-newTime));
+            StartCoroutine(PlayVideoDelayedCoroutine(VideoToRealSeconds(-newTime)));
         }
         else if (newTime > _videoPlayer.VideoDuration && _videoPlayer.VideoDuration > 0)
         {
@@ -740,6 +757,14 @@ public class PlaybackManager : MonoBehaviour
         if (Math.Abs(_videoPlayer.PlayerTime - newTime) < 0.2f) return;
 
         _videoPlayer.PlayerTime = newTime;
+    }
+
+    // Called when the user moves the speed slider: re-time the running video to the new speed
+    public void ApplyPlaybackSpeed()
+    {
+        if (_videoConfig == null || !_videoPlayer.IsPlaying) return;
+        if (!_speedPendingFirstFrame) _videoPlayer.PlaybackSpeed = TargetVideoSpeed;
+        ResyncVideo();
     }
 
     private void VideoPlayerErrorReceived(string message)
@@ -841,7 +866,7 @@ public class PlaybackManager : MonoBehaviour
         {
             _videoPlayer.Hide();
             StopAllCoroutines();
-            StartCoroutine(PlayVideoDelayedCoroutine((float)-newTime));
+            StartCoroutine(PlayVideoDelayedCoroutine(VideoToRealSeconds((float)-newTime)));
         }
         else if (newTime > _videoPlayer.VideoDuration && _videoPlayer.VideoDuration > 0)
         {
@@ -908,7 +933,7 @@ public class PlaybackManager : MonoBehaviour
 
             // Start the preview at the point the video kicks in
             var startTime = 0f;
-            if (_videoConfig.offset < 0) startTime = -_videoConfig.GetOffsetInSec();
+            if (_videoConfig.offset < 0) startTime = -_videoConfig.GetOffsetInSec() / _videoConfig.PlaybackSpeed;
 
             if (_songPreviewPlayer == null)
             {

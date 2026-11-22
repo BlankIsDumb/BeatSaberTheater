@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading.Tasks;
 using BeatmapEditor3D.DataModels;
 using BeatSaberMarkupLanguage;
@@ -29,6 +30,9 @@ namespace BeatSaberTheater.VideoMenu;
 
 public class VideoMenuUI : IInitializable, IDisposable
 {
+    private const float MinPlaybackSpeed = 0.25f;
+    private const float MaxPlaybackSpeed = 2f;
+
     private readonly GameplaySetup _gameplaySetup;
     private readonly LoggingService _loggingService;
     private readonly PlaybackManager _playbackManager;
@@ -49,6 +53,7 @@ public class VideoMenuUI : IInitializable, IDisposable
     [UIComponent("video-author")] private readonly TextMeshProUGUI _videoAuthorText = null!;
     [UIComponent("video-duration")] private readonly TextMeshProUGUI _videoDurationText = null!;
     [UIComponent("video-status")] private readonly TextMeshProUGUI _videoStatusText = null!;
+    [UIComponent("video-offset-label")] private readonly TextMeshProUGUI _videoOffsetLabel = null!;
     [UIComponent("video-offset")] private readonly TextMeshProUGUI _videoOffsetText = null!;
     [UIComponent("video-thumbnail")] private readonly Image _videoThumnnail = null!;
     [UIComponent("preview-button")] private readonly TextMeshProUGUI _previewButtonText = null!;
@@ -61,14 +66,6 @@ public class VideoMenuUI : IInitializable, IDisposable
     [UIComponent("revert-offset-button")] private readonly Button _revertOffsetButton = null!;
     [UIObject("title-buttons")] private readonly GameObject _titleButtons = null!;
     [UIComponent("display-settings-view")] private readonly RectTransform _displaySettingsViewRect = null!;
-    [UIComponent("display-popup")] private readonly RectTransform _displayPopupRect = null!;
-    [UIComponent("display-popup-text")] private readonly TextMeshProUGUI _displayPopupText = null!;
-    [UIObject("display-enabled-setting")] private readonly GameObject _displayEnabledSetting = null!;
-    [UIObject("display-brightness-setting")] private readonly GameObject _displayBrightnessSetting = null!;
-    [UIObject("display-size-setting")] private readonly GameObject _displaySizeSetting = null!;
-    [UIObject("display-corner-setting")] private readonly GameObject _displayCornerSetting = null!;
-    [UIObject("display-edge-setting")] private readonly GameObject _displayEdgeSetting = null!;
-    [UIObject("display-bloom-setting")] private readonly GameObject _displayBloomSetting = null!;
     [UIComponent("turn-on-button")] private readonly Button _turnOnButton = null!;
     [UIObject("offset-controls")] private readonly GameObject _offsetControls = null!;
     [UIObject("customize-offset-toggle")] private readonly GameObject _customizeOffsetToggle = null!;
@@ -89,12 +86,37 @@ public class VideoMenuUI : IInitializable, IDisposable
             _currentVideo.userSettings ??= new UserSettings();
             _currentVideo.userSettings.customOffset = true;
             _currentVideo.userSettings.originalOffset = _currentVideo.offset;
+            _currentVideo.userSettings.originalPlaybackSpeed = _currentVideo.PlaybackSpeed;
             _currentVideo.NeedsToSave = true;
             _customizeOffsetToggle.SetActive(false);
             _offsetControls.SetActive(true);
             UpdateRevertOffsetButton();
         }
     }
+
+    [UIValue("playback-speed")]
+    public float PlaybackSpeed
+    {
+        get => ClampSpeed(_currentVideo?.PlaybackSpeed ?? 1f);
+        set
+        {
+            if (_currentVideo == null) return;
+
+            var speed = ClampSpeed(value);
+            // A slider refresh can echo its displayed value, even if a config's speed is outside the slider range.
+            if (Mathf.Approximately(speed, ClampSpeed(_currentVideo.PlaybackSpeed))) return;
+
+            RecordOriginalSync(_currentVideo);
+            _currentVideo.playbackSpeed = Mathf.Approximately(speed, 1f) ? null : speed;
+            _currentVideo.NeedsToSave = true;
+            _loggingService.Info($"Playback speed set to {speed:0.00}x");
+            _playbackManager.ApplyPlaybackSpeed();
+            UpdateOffsetControls();
+        }
+    }
+
+    private static float ClampSpeed(float speed) =>
+        Mathf.Clamp(Mathf.Round(speed * 100f) / 100f, MinPlaybackSpeed, MaxPlaybackSpeed);
 
     private VideoMenuStatus _menuStatus = null!;
     private LevelDetailViewController? _levelDetailMenu;
@@ -112,7 +134,6 @@ public class VideoMenuUI : IInitializable, IDisposable
     private string? _thumbnailURL;
 
     private bool _displaySettingsOpen;
-    private HoverPopup? _displayPopup;
 
     private readonly TheaterCoroutineStarter _coroutineStarter;
     private readonly DisplaySettings _displaySettings;
@@ -165,14 +186,6 @@ public class VideoMenuUI : IInitializable, IDisposable
         var titleButtons = (RectTransform)_titleButtons.transform;
         titleButtons.pivot = new Vector2(1f, 0.5f);
         titleButtons.localScale = new Vector3(0.5f, 0.5f, 1f);
-
-        _displayPopup = new HoverPopup(_displayPopupRect, _displayPopupText);
-        HoverDescription.Attach(_displayEnabledSetting, SettingDescriptions.TheaterEnabled, _displayPopup);
-        HoverDescription.Attach(_displayBrightnessSetting, SettingDescriptions.Brightness, _displayPopup);
-        HoverDescription.Attach(_displaySizeSetting, SettingDescriptions.ScreenSize, _displayPopup);
-        HoverDescription.Attach(_displayCornerSetting, SettingDescriptions.CornerRoundness, _displayPopup);
-        HoverDescription.Attach(_displayEdgeSetting, SettingDescriptions.EdgeSoftness, _displayPopup);
-        HoverDescription.Attach(_displayBloomSetting, SettingDescriptions.Bloom, _displayPopup);
 
         _searchKeyboard.ClearOnOpen = false;
 
@@ -390,6 +403,18 @@ public class VideoMenuUI : IInitializable, IDisposable
         if (_currentVideo == null) return;
 
         _videoOffsetText.text = $"{_currentVideo.offset:n0}" + " ms";
+        var original = GetOriginalOffset(_currentVideo);
+        if (original == null || original == _currentVideo.offset)
+        {
+            _videoOffsetLabel.text = "Video Offset";
+        }
+        else
+        {
+            var delta = _currentVideo.offset - original.Value;
+            var source = _currentVideo.IsOfficialConfig || _currentVideo.bundledConfig == true ? "default" : "original";
+            _videoOffsetLabel.text = $"Video Offset <color=#A0A8B4>({delta.ToString("+#,0;-#,0")} ms from {source})</color>";
+        }
+
         if (CustomizeOffset)
         {
             _customizeOffsetToggle.SetActive(false);
@@ -410,10 +435,11 @@ public class VideoMenuUI : IInitializable, IDisposable
         var originalOffset = _currentVideo == null ? null : GetOriginalOffset(_currentVideo);
         _revertOffsetButton.interactable = _currentVideo != null && originalOffset != null &&
                                            (originalOffset != _currentVideo.offset ||
+                                            !Mathf.Approximately(GetOriginalPlaybackSpeed(_currentVideo), _currentVideo.PlaybackSpeed) ||
                                             _currentVideo.userSettings?.customOffset == true);
     }
 
-    // The offset this video had before the user changed it: recorded on the first change (or when "Customize offset"
+    // The offset this video had before the user changed it: recorded on the first change (or when "Customize sync"
     // is ticked on a mapper's config). Configs that came from the bundled list and were edited before this was
     // recorded fall back to the bundled value.
     private int? GetOriginalOffset(VideoConfig video)
@@ -423,6 +449,9 @@ public class VideoMenuUI : IInitializable, IDisposable
             return _videoLoader.GetBundledConfigOffset(_currentLevel);
         return null;
     }
+
+    private static float GetOriginalPlaybackSpeed(VideoConfig video) =>
+        video.userSettings?.originalPlaybackSpeed ?? video.PlaybackSpeed;
 
     public void SetupLevelDetailView(VideoConfig videoConfig)
     {
@@ -687,15 +716,20 @@ public class VideoMenuUI : IInitializable, IDisposable
         }
     }
 
+    // Remember the starting offset and speed on the first sync change, so "Revert sync" can go back to them
+    private void RecordOriginalSync(VideoConfig video)
+    {
+        var originalOffset = GetOriginalOffset(video) ?? video.offset;
+        video.userSettings ??= new UserSettings();
+        video.userSettings.originalOffset ??= originalOffset;
+        video.userSettings.originalPlaybackSpeed ??= video.PlaybackSpeed;
+    }
+
     private void ApplyOffset(int offset)
     {
         if (_currentVideo == null) return;
 
-        // Remember the starting offset on the first change so "Revert offset" can go back to it
-        var originalOffset = GetOriginalOffset(_currentVideo) ?? _currentVideo.offset;
-        _currentVideo.userSettings ??= new UserSettings();
-        _currentVideo.userSettings.originalOffset ??= originalOffset;
-
+        RecordOriginalSync(_currentVideo);
         ChangeOffset(offset);
     }
 
@@ -1012,10 +1046,15 @@ public class VideoMenuUI : IInitializable, IDisposable
         var originalOffset = GetOriginalOffset(_currentVideo);
         if (originalOffset == null) return;
 
-        _loggingService.Info($"Reverting offset from {_currentVideo.offset} ms to {originalOffset.Value} ms");
-        // UserSettings only holds the custom offset state, so dropping it hands mapper configs back to the mapper's
-        // offset (the "Customize offset" toggle shows again) and forgets the recorded original
+        var originalSpeed = GetOriginalPlaybackSpeed(_currentVideo);
+        _loggingService.Info(
+            $"Reverting sync from {_currentVideo.offset} ms at {_currentVideo.PlaybackSpeed}x to {originalOffset.Value} ms at {originalSpeed}x");
+
+        // Clear the saved offset and speed baselines so mapper configs show "Customize sync" again.
         _currentVideo.userSettings = null;
+        _currentVideo.playbackSpeed = Mathf.Approximately(originalSpeed, 1f) ? null : originalSpeed;
+        _currentVideo.NeedsToSave = true;
+        _playbackManager.ApplyPlaybackSpeed();
         ChangeOffset(originalOffset.Value - _currentVideo.offset);
     }
 
@@ -1070,6 +1109,10 @@ public class VideoMenuUI : IInitializable, IDisposable
         return DisplaySettings.FormatPercent(value);
     }
 
+    [UIAction("format-speed")]
+    [UsedImplicitly]
+    private string FormatSpeed(object value) => Convert.ToSingle(value).ToString("0.00", CultureInfo.InvariantCulture) + "x";
+
     [UIAction("on-display-settings-action")]
     [UsedImplicitly]
     private void OnDisplaySettingsAction()
@@ -1081,7 +1124,6 @@ public class VideoMenuUI : IInitializable, IDisposable
         _videoDetailsViewRect.gameObject.SetActive(false);
         _videoSearchResultsViewRect.gameObject.SetActive(false);
         _displaySettingsViewRect.gameObject.SetActive(true);
-        _displayPopup?.Hide();
         _bsmlParserParams.EmitEvent("refresh-display-values");
     }
 
@@ -1148,6 +1190,13 @@ public class VideoMenuUI : IInitializable, IDisposable
         ApplyOffset(-20);
     }
 
+    [UIAction("on-offset-decrease-action-fine")]
+    [UsedImplicitly]
+    private void DecreaseOffsetFine()
+    {
+        ApplyOffset(-5);
+    }
+
     [UIAction("on-offset-increase-action-high")]
     [UsedImplicitly]
     private void IncreaseOffsetHigh()
@@ -1167,6 +1216,13 @@ public class VideoMenuUI : IInitializable, IDisposable
     private void IncreaseOffsetLow()
     {
         ApplyOffset(20);
+    }
+
+    [UIAction("on-offset-increase-action-fine")]
+    [UsedImplicitly]
+    private void IncreaseOffsetFine()
+    {
+        ApplyOffset(5);
     }
 
     private string GetConversionProgressDisplayString(VideoConfig config)

@@ -47,39 +47,51 @@
                     <text id='video-offset-label' align='Center' font-size='3' text='Video Offset'></text>
                     <horizontal horizontal-fit='PreferredSize' align='Center' spacing="1">
                         <button id='offset-decrease-button-high' font-size='3' pref-width='10'
-                                hover-hint='Starts video later (-1000 ms)' text='---'
+                                hover-hint='Starts video later (-1000 ms)' text='-1s'
                                 on-click='on-offset-decrease-action-high'/>
                         <button id='offset-decrease-button-mid' font-size='3' pref-width='10'
-                                hover-hint='Starts video later (-100 ms)' text='--'
+                                hover-hint='Starts video later (-100 ms)' text='-100'
                                 on-click='on-offset-decrease-action-mid'/>
                         <button id='offset-decrease-button-low' font-size='3' pref-width='10'
-                                hover-hint='Starts video later (-20 ms)' text='-'
+                                hover-hint='Starts video later (-20 ms)' text='-20'
                                 on-click='on-offset-decrease-action-low'/>
+                        <button id='offset-decrease-button-fine' font-size='3' pref-width='10'
+                                hover-hint='Starts video later (-5 ms)' text='-5'
+                                on-click='on-offset-decrease-action-fine'/>
                         <vertical pref-width='16'>
                             <text id='video-offset' text="0" pad-left='5' pad-right='5' font-size='5'
                                   align='Center'></text>
                         </vertical>
+                        <button id='offset-increase-button-fine' font-size='3' pref-width='10'
+                                hover-hint='Starts video earlier (+5 ms)' text='+5'
+                                on-click='on-offset-increase-action-fine'/>
                         <button id='offset-increase-button-low' font-size='3' pref-width='10'
-                                hover-hint='Starts video earlier (+20 ms)' text='+'
+                                hover-hint='Starts video earlier (+20 ms)' text='+20'
                                 on-click='on-offset-increase-action-low'/>
                         <button id='offset-increase-button-mid' font-size='3' pref-width='10'
-                                hover-hint='Starts video earlier (+100 ms)' text='++'
+                                hover-hint='Starts video earlier (+100 ms)' text='+100'
                                 on-click='on-offset-increase-action-mid'/>
                         <button id='offset-increase-button-high' font-size='3' pref-width='10'
-                                hover-hint='Starts video earlier (+1000 ms)' text='+++'
+                                hover-hint='Starts video earlier (+1000 ms)' text='+1s'
                                 on-click='on-offset-increase-action-high'/>
                     </horizontal>
+                    <modifier-container child-expand-width='true' horizontal-fit='PreferredSize'>
+                        <slider-setting id='playback-speed-slider' text='Playback speed' value='playback-speed'
+                                        min='0.25' max='2' increment='0.01' show-buttons='true' apply-on-change='true'
+                                        formatter='format-speed' get-event='update-customize-offset'
+                                        hover-hint='Plays the video faster or slower than the song. 1.00x is normal.'/>
+                    </modifier-container>
                 </vertical>
                 <horizontal id="customize-offset-toggle" preferred-width="45">
-                    <bool-setting apply-on-change="true" text='Customize offset' value='customize-offset'
+                    <bool-setting apply-on-change="true" text='Customize sync' value='customize-offset'
                                   bind-value="true" get-event="update-customize-offset"
-                                  hover-hint="Change the offset that was configured by the mapper.&#xD;&#xA;&#xD;&#xA;Only check this if the video is out of sync for you."></bool-setting>
+                                  hover-hint="Change the offset and speed from the map's video config. Only needed if the video is out of sync for you."></bool-setting>
                 </horizontal>
                 <horizontal horizontal-fit='PreferredSize' align='Center' spacing='2'>
                     <button id='preview-button' hover-hint='Left ear is the video, right ear is the map' text='Preview'
                             on-click='on-preview-action'/>
-                    <button id='revert-offset-button' text='Revert offset' on-click='on-revert-offset-action'
-                            hover-hint="Go back to the offset this video had before you changed it.&#xD;&#xA;&#xD;&#xA;For maps that came with a video config, this is the mapper's offset."/>
+                    <button id='revert-offset-button' text='Revert sync' on-click='on-revert-offset-action'
+                            hover-hint='Go back to the offset and speed this video had before you changed them.'/>
                 </horizontal>
             </vertical>
         </vertical>
@@ -101,37 +113,36 @@
         </horizontal>
     </bg>
 
-    <!-- Ranges must match Settings/DisplaySettings.cs. Descriptions: Settings/SettingDescriptions.cs, shown in the
-         black popup at the bottom of this view (HoverPopup) instead of the game's white hover-hint bubble. -->
+    <!-- Ranges must match Settings/DisplaySettings.cs. -->
     <bg id='display-settings-view' active='false'>
         <vertical child-expand-height='false' spacing='1' vertical-fit='PreferredSize' pad-top='-3' align='top'>
-            <text text='Display settings' font-size='5' align='Center'/>
+            <text text='Display settings' font-size='5' align='Center' italics='true'/>
             <modifier-container child-expand-width='true' horizontal-fit='PreferredSize'>
                 <bool-setting id='display-enabled-setting' text='Theater enabled' value='display-theater-enabled'
-                              apply-on-change='true' get-event='refresh-display-values'/>
+                              apply-on-change='true' get-event='refresh-display-values'
+                              hover-hint='Turns videos and environment changes on or off.'/>
                 <slider-setting id='display-brightness-setting' text='Brightness' value='display-brightness'
                                 min='10' max='100' increment='5' integer-only='true' apply-on-change='true'
-                                formatter='format-percent' get-event='refresh-display-values'/>
+                                formatter='format-percent' get-event='refresh-display-values'
+                                hover-hint='Dims the video and its glow.'/>
                 <slider-setting id='display-size-setting' text='Screen size' value='display-screen-size'
                                 min='25' max='300' increment='5' integer-only='true' apply-on-change='true'
-                                formatter='format-percent' get-event='refresh-display-values'/>
+                                formatter='format-percent' get-event='refresh-display-values'
+                                hover-hint='Only applies in songs, not in the menu.'/>
                 <slider-setting id='display-corner-setting' text='Corner roundness' value='display-corner-roundness'
                                 min='0' max='100' increment='1' integer-only='true' apply-on-change='true'
-                                get-event='refresh-display-values'/>
+                                get-event='refresh-display-values'
+                                hover-hint="Rounds the screen's corners. Some maps set their own."/>
                 <slider-setting id='display-edge-setting' text='Edge softness' value='display-edge-softness'
                                 min='0' max='100' increment='5' integer-only='true' apply-on-change='true'
-                                formatter='format-percent' get-event='refresh-display-values'/>
+                                formatter='format-percent' get-event='refresh-display-values'
+                                hover-hint="Fades the screen's edges out. Some maps set their own."/>
                 <slider-setting id='display-bloom-setting' text='Bloom' value='display-bloom'
                                 min='0' max='150' increment='10' integer-only='true' apply-on-change='true'
-                                formatter='format-percent' get-event='refresh-display-values'/>
+                                formatter='format-percent' get-event='refresh-display-values'
+                                hover-hint='Glow around the screen. 0% turns it off.'/>
             </modifier-container>
             <button text='Back' on-click='on-display-settings-back-action'/>
         </vertical>
-        <!-- Last child, so it draws over the settings. Placed above the pointed-at setting in code. -->
-        <horizontal id='display-popup' active='false' bg='round-rect-panel' bg-color='#000000' bg-alpha='0.8'
-                    pad-left='2' pad-right='2' pad-top='1' pad-bottom='1'
-                    horizontal-fit='PreferredSize' vertical-fit='PreferredSize'>
-            <text id='display-popup-text' text=' ' font-size='3.4' align='Center'/>
-        </horizontal>
     </bg>
 </bg>

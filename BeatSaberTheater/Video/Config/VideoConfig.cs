@@ -30,7 +30,7 @@ public class VideoConfig
     public bool? loop;
     public bool? mergePropGroups;
     public int offset; //ms
-    public float? playbackSpeed; //percent
+    public float? playbackSpeed; // multiplier, 1 = normal speed
     public float? screenHeight;
     public float? screenCurvature;
     public SerializableVector3? screenPosition;

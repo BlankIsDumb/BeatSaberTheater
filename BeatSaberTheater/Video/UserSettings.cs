@@ -4,4 +4,5 @@ public class UserSettings
 {
     public bool? customOffset;
     public int? originalOffset;
+    public float? originalPlaybackSpeed;
 }
