@@ -64,8 +64,12 @@
                                   bind-value="true" get-event="update-customize-offset"
                                   hover-hint="Change the offset that was configured by the mapper.&#xD;&#xA;&#xD;&#xA;Only check this if the video is out of sync for you."></bool-setting>
                 </horizontal>
-                <button id='preview-button' hover-hint='Left ear is the video, right ear is the map' text='Preview'
-                        on-click='on-preview-action'/>
+                <horizontal horizontal-fit='PreferredSize' align='Center' spacing='2'>
+                    <button id='preview-button' hover-hint='Left ear is the video, right ear is the map' text='Preview'
+                            on-click='on-preview-action'/>
+                    <button id='revert-offset-button' text='Revert offset' on-click='on-revert-offset-action'
+                            hover-hint="Go back to the offset this video had before you changed it.&#xD;&#xA;&#xD;&#xA;For maps that came with a video config, this is the mapper's offset."/>
+                </horizontal>
             </vertical>
         </vertical>
     </bg>

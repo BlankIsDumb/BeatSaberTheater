@@ -58,6 +58,7 @@ public class VideoMenuUI : IInitializable, IDisposable
     [UIComponent("delete-video-button")] private readonly Button _deleteVideoButton = null!;
     [UIComponent("delete-video-button")] private readonly TextMeshProUGUI _deleteVideoButtonText = null!;
     [UIComponent("download-button")] private readonly Button _downloadButton = null!;
+    [UIComponent("revert-offset-button")] private readonly Button _revertOffsetButton = null!;
     [UIObject("offset-controls")] private readonly GameObject _offsetControls = null!;
     [UIObject("customize-offset-toggle")] private readonly GameObject _customizeOffsetToggle = null!;
     [UIParams] private readonly BSMLParserParams _bsmlParserParams = null!;
@@ -80,6 +81,7 @@ public class VideoMenuUI : IInitializable, IDisposable
             _currentVideo.NeedsToSave = true;
             _customizeOffsetToggle.SetActive(false);
             _offsetControls.SetActive(true);
+            UpdateRevertOffsetButton();
         }
     }
 
@@ -231,7 +233,7 @@ public class VideoMenuUI : IInitializable, IDisposable
         _previewButtonText.text = _playbackManager.IsPreviewPlaying ? "Stop preview" : "Preview";
 
         if (_currentLevel != null && VideoLoader.IsDlcSong(_currentLevel) && _downloadService.LibrariesAvailable())
-            CheckEntitlementAndEnableSearch(_currentLevel).Start();
+            CheckEntitlementAndEnableSearch(_currentLevel).LogErrors(_loggingService, "Entitlement check");
 
         if (_currentVideo == null) return;
 
@@ -331,12 +333,19 @@ public class VideoMenuUI : IInitializable, IDisposable
         _videoAuthorText.text = "Author: " + TheaterFileHelpers.FilterEmoji(_currentVideo.author ?? "Unknown Author");
         _videoDurationText.text = "Duration: " + TheaterFileHelpers.SecondsToString(_currentVideo.duration);
 
-        _videoOffsetText.text = $"{_currentVideo.offset:n0}" + " ms";
         SetThumbnail(_currentVideo.videoID != null
             ? $"https://i.ytimg.com/vi/{_currentVideo.videoID}/hqdefault.jpg"
             : null);
 
         UpdateStatusText(_currentVideo);
+        UpdateOffsetControls();
+    }
+
+    private void UpdateOffsetControls()
+    {
+        if (_currentVideo == null) return;
+
+        _videoOffsetText.text = $"{_currentVideo.offset:n0}" + " ms";
         if (CustomizeOffset)
         {
             _customizeOffsetToggle.SetActive(false);
@@ -349,6 +358,26 @@ public class VideoMenuUI : IInitializable, IDisposable
         }
 
         _bsmlParserParams.EmitEvent("update-customize-offset");
+        UpdateRevertOffsetButton();
+    }
+
+    private void UpdateRevertOffsetButton()
+    {
+        var originalOffset = _currentVideo == null ? null : GetOriginalOffset(_currentVideo);
+        _revertOffsetButton.interactable = _currentVideo != null && originalOffset != null &&
+                                           (originalOffset != _currentVideo.offset ||
+                                            _currentVideo.userSettings?.customOffset == true);
+    }
+
+    // The offset this video had before the user changed it: recorded on the first change (or when "Customize offset"
+    // is ticked on a mapper's config). Configs that came from the bundled list and were edited before this was
+    // recorded fall back to the bundled value.
+    private int? GetOriginalOffset(VideoConfig video)
+    {
+        if (video.userSettings?.originalOffset != null) return video.userSettings.originalOffset;
+        if (video.bundledConfig == true && _currentLevel != null)
+            return _videoLoader.GetBundledConfigOffset(_currentLevel);
+        return null;
     }
 
     public void SetupLevelDetailView(VideoConfig videoConfig)
@@ -486,7 +515,7 @@ public class VideoMenuUI : IInitializable, IDisposable
 
         if (url == null)
         {
-            SetThumbnailFromCover(_currentLevel).Start();
+            SetThumbnailFromCover(_currentLevel).LogErrors(_loggingService, "Loading cover as thumbnail");
             return;
         }
 
@@ -610,10 +639,22 @@ public class VideoMenuUI : IInitializable, IDisposable
     {
         if (_currentVideo == null) return;
 
-        _currentVideo.offset += offset;
-        _videoOffsetText.text = $"{_currentVideo.offset:n0}" + " ms";
+        // Remember the starting offset on the first change so "Revert offset" can go back to it
+        var originalOffset = GetOriginalOffset(_currentVideo) ?? _currentVideo.offset;
+        _currentVideo.userSettings ??= new UserSettings();
+        _currentVideo.userSettings.originalOffset ??= originalOffset;
+
+        ChangeOffset(offset);
+    }
+
+    private void ChangeOffset(int delta)
+    {
+        if (_currentVideo == null) return;
+
+        _currentVideo.offset += delta;
         _currentVideo.NeedsToSave = true;
-        _playbackManager.ApplyOffset(offset);
+        if (delta != 0) _playbackManager.ApplyOffset(delta);
+        UpdateOffsetControls();
     }
 
     [UIAction("on-search-action")]
@@ -906,8 +947,24 @@ public class VideoMenuUI : IInitializable, IDisposable
     [UsedImplicitly]
     private void OnPreviewAction()
     {
-        _playbackManager.StartPreview().Start();
+        _playbackManager.StartPreview().LogErrors(_loggingService, "Preview");
         SetButtonState(true);
+    }
+
+    [UIAction("on-revert-offset-action")]
+    [UsedImplicitly]
+    private void OnRevertOffsetAction()
+    {
+        if (_currentVideo == null) return;
+
+        var originalOffset = GetOriginalOffset(_currentVideo);
+        if (originalOffset == null) return;
+
+        _loggingService.Info($"Reverting offset from {_currentVideo.offset} ms to {originalOffset.Value} ms");
+        // UserSettings only holds the custom offset state, so dropping it hands mapper configs back to the mapper's
+        // offset (the "Customize offset" toggle shows again) and forgets the recorded original
+        _currentVideo.userSettings = null;
+        ChangeOffset(originalOffset.Value - _currentVideo.offset);
     }
 
     [UIAction("on-offset-decrease-action-high")]

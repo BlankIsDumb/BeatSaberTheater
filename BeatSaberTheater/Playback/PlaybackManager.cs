@@ -271,7 +271,7 @@ public class PlaybackManager : MonoBehaviour
 
             if (_config.CoverEnabled && (_videoConfig?.forceEnvironmentModifications == null ||
                                          _videoConfig.forceEnvironmentModifications == false))
-                ShowSongCover().Start();
+                ShowSongCover().LogErrors(_loggingService, "Showing song cover");
             return;
         }
 

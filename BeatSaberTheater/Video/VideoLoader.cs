@@ -49,6 +49,10 @@ public class VideoLoader(
     private static readonly ConcurrentDictionary<string, VideoConfig> CachedConfigs = new();
     private static readonly ConcurrentDictionary<string, VideoConfig> BundledConfigs = new();
 
+    // Offsets exactly as shipped in configs.json. The BundledConfigs objects are handed out and edited in place,
+    // so they can't be used to look up the original value later.
+    private static readonly ConcurrentDictionary<string, int> BundledOffsets = new();
+
     private static BeatmapLevelsModel? _beatmapLevelsModel;
 
     public static BeatmapLevelsModel BeatmapLevelsModel
@@ -172,11 +176,21 @@ public class VideoLoader(
         return config;
     }
 
-    private VideoConfig? GetConfigFromBundledConfigs(BeatmapLevel level)
+    private static string GetBundledConfigKey(BeatmapLevel level)
     {
-        var levelID = !level.hasPrecalculatedData
+        return !level.hasPrecalculatedData
             ? level.levelID
             : TheaterFileHelpers.ReplaceIllegalFilesystemChars(level.songName.Trim());
+    }
+
+    public int? GetBundledConfigOffset(BeatmapLevel level)
+    {
+        return BundledOffsets.TryGetValue(GetBundledConfigKey(level), out var offset) ? offset : null;
+    }
+
+    private VideoConfig? GetConfigFromBundledConfigs(BeatmapLevel level)
+    {
+        var levelID = GetBundledConfigKey(level);
         BundledConfigs.TryGetValue(levelID, out var config);
 
         if (config == null)
@@ -820,7 +834,11 @@ public class VideoLoader(
     public void Initialize()
     {
         var configs = LoadBundledConfigs().Result;
-        foreach (var config in configs) BundledConfigs.TryAdd(config.levelID, config.config);
+        foreach (var config in configs)
+        {
+            BundledConfigs.TryAdd(config.levelID, config.config);
+            BundledOffsets.TryAdd(config.levelID, config.config.offset);
+        }
 
         // Subscribe to songs loaded event to run migration when levels are available
         Loader.SongsLoadedEvent += OnSongsLoaded;
