@@ -376,7 +376,7 @@ public class VideoLoader(
         return videoConfig ?? GetConfigFromBundledConfigs(level);
     }
 
-    private string? GetMapPath(BeatmapLevel level)
+    public string? GetMapPath(BeatmapLevel level)
     {
         // OST/base-game levels aren't custom levels and have no entry here
         if (!_customLevelLoader._loadedBeatmapSaveData.TryGetValue(level.levelID, out var loadedSaveData))

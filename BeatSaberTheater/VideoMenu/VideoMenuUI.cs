@@ -2,6 +2,9 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using BeatmapEditor3D.DataModels;
 using BeatSaberMarkupLanguage;
@@ -13,6 +16,7 @@ using BeatSaberTheater.Download;
 using BeatSaberTheater.Playback;
 using BeatSaberTheater.Services;
 using BeatSaberTheater.Settings;
+using BeatSaberTheater.Sync;
 using BeatSaberTheater.Util;
 using BeatSaberTheater.Video;
 using BeatSaberTheater.Video.Config;
@@ -69,6 +73,38 @@ public class VideoMenuUI : IInitializable, IDisposable
     [UIComponent("turn-on-button")] private readonly Button _turnOnButton = null!;
     [UIObject("offset-controls")] private readonly GameObject _offsetControls = null!;
     [UIObject("customize-offset-toggle")] private readonly GameObject _customizeOffsetToggle = null!;
+    [UIComponent("auto-sync-button")] private readonly Button _autoSyncButton = null!;
+    [UIComponent("auto-sync-button")] private readonly TextMeshProUGUI _autoSyncButtonText = null!;
+    [UIComponent("auto-sync-modal")] private readonly ModalView _autoSyncModal = null!;
+    [UIComponent("auto-sync-title")] private readonly TextMeshProUGUI _autoSyncTitle = null!;
+    [UIComponent("auto-sync-subtitle")] private readonly TextMeshProUGUI _autoSyncSubtitle = null!;
+    [UIObject("auto-sync-rows")] private readonly GameObject _autoSyncRows = null!;
+
+    [UIObject("auto-sync-row-0")] private readonly GameObject _autoSyncRow0 = null!;
+    [UIComponent("auto-sync-offset-0")] private readonly TextMeshProUGUI _autoSyncOffset0 = null!;
+    [UIComponent("auto-sync-tag-0")] private readonly TextMeshProUGUI _autoSyncTag0 = null!;
+    [UIComponent("auto-sync-info-0")] private readonly TextMeshProUGUI _autoSyncInfo0 = null!;
+    [UIComponent("auto-sync-try-0")] private readonly Button _autoSyncTry0 = null!;
+    [UIComponent("auto-sync-try-0")] private readonly TextMeshProUGUI _autoSyncTryText0 = null!;
+    [UIComponent("auto-sync-apply-0")] private readonly Button _autoSyncApply0 = null!;
+    [UIComponent("auto-sync-note-0")] private readonly TextMeshProUGUI _autoSyncNote = null!;
+
+    [UIObject("auto-sync-row-1")] private readonly GameObject _autoSyncRow1 = null!;
+    [UIComponent("auto-sync-offset-1")] private readonly TextMeshProUGUI _autoSyncOffset1 = null!;
+    [UIComponent("auto-sync-tag-1")] private readonly TextMeshProUGUI _autoSyncTag1 = null!;
+    [UIComponent("auto-sync-info-1")] private readonly TextMeshProUGUI _autoSyncInfo1 = null!;
+    [UIComponent("auto-sync-try-1")] private readonly Button _autoSyncTry1 = null!;
+    [UIComponent("auto-sync-try-1")] private readonly TextMeshProUGUI _autoSyncTryText1 = null!;
+    [UIComponent("auto-sync-apply-1")] private readonly Button _autoSyncApply1 = null!;
+
+    [UIObject("auto-sync-row-2")] private readonly GameObject _autoSyncRow2 = null!;
+    [UIComponent("auto-sync-offset-2")] private readonly TextMeshProUGUI _autoSyncOffset2 = null!;
+    [UIComponent("auto-sync-tag-2")] private readonly TextMeshProUGUI _autoSyncTag2 = null!;
+    [UIComponent("auto-sync-info-2")] private readonly TextMeshProUGUI _autoSyncInfo2 = null!;
+    [UIComponent("auto-sync-try-2")] private readonly Button _autoSyncTry2 = null!;
+    [UIComponent("auto-sync-try-2")] private readonly TextMeshProUGUI _autoSyncTryText2 = null!;
+    [UIComponent("auto-sync-apply-2")] private readonly Button _autoSyncApply2 = null!;
+
     [UIParams] private readonly BSMLParserParams _bsmlParserParams = null!;
 
     private Coroutine? _searchLoadingCoroutine;
@@ -91,6 +127,7 @@ public class VideoMenuUI : IInitializable, IDisposable
             _customizeOffsetToggle.SetActive(false);
             _offsetControls.SetActive(true);
             UpdateRevertOffsetButton();
+            UpdateAutoSyncButton();
         }
     }
 
@@ -134,6 +171,18 @@ public class VideoMenuUI : IInitializable, IDisposable
     private string? _thumbnailURL;
 
     private bool _displaySettingsOpen;
+
+    private (GameObject Row, TextMeshProUGUI Offset, TextMeshProUGUI Tag, TextMeshProUGUI Info, Button Try,
+        TextMeshProUGUI TryText, Button Apply)[] _autoSyncRowControls = [];
+    private CancellationTokenSource? _autoSyncCts;
+    private VideoConfig? _autoSyncVideo;
+    private bool _autoSyncPopupOpen;
+    private int _autoSyncStartOffset;
+    private int _autoSyncTriedIndex = -1;
+    private readonly List<int> _autoSyncOffsets = [];
+    private float? _autoSyncTryStart;
+    private SyncConfidence _autoSyncConfidence;
+    private bool _editorBeatmapSelected;
 
     private readonly TheaterCoroutineStarter _coroutineStarter;
     private readonly DisplaySettings _displaySettings;
@@ -189,6 +238,18 @@ public class VideoMenuUI : IInitializable, IDisposable
 
         _searchKeyboard.ClearOnOpen = false;
 
+        _autoSyncRowControls =
+        [
+            (_autoSyncRow0, _autoSyncOffset0, _autoSyncTag0, _autoSyncInfo0, _autoSyncTry0, _autoSyncTryText0, _autoSyncApply0),
+            (_autoSyncRow1, _autoSyncOffset1, _autoSyncTag1, _autoSyncInfo1, _autoSyncTry1, _autoSyncTryText1, _autoSyncApply1),
+            (_autoSyncRow2, _autoSyncOffset2, _autoSyncTag2, _autoSyncInfo2, _autoSyncTry2, _autoSyncTryText2, _autoSyncApply2)
+        ];
+
+        // BSML's text tag has no LayoutElement to receive preferred-width.
+        SetAutoSyncTextWidth(_autoSyncSubtitle, 104f);
+        foreach (var row in _autoSyncRowControls)
+            SetAutoSyncTextWidth(row.Offset, 28f);
+
         if (_videoMenuInitialized) return;
 
         _videoMenuInitialized = true;
@@ -209,6 +270,7 @@ public class VideoMenuUI : IInitializable, IDisposable
 
     public void Dispose()
     {
+        CancelAutoSync();
         _gameplaySetup.RemoveTab("Theater");
         _displaySettings.TheaterEnabledChanged -= OnTheaterEnabledChanged;
     }
@@ -285,6 +347,7 @@ public class VideoMenuUI : IInitializable, IDisposable
                                            !VideoLoader.IsDlcSong(_currentLevel) &&
                                            _downloadService.LibrariesAvailable());
         _previewButtonText.text = _playbackManager.IsPreviewPlaying ? "Stop preview" : "Preview";
+        UpdateAutoSyncButton();
 
         if (_currentLevel != null && VideoLoader.IsDlcSong(_currentLevel) && _downloadService.LibrariesAvailable())
             CheckEntitlementAndEnableSearch(_currentLevel).LogErrors(_loggingService, "Entitlement check");
@@ -428,6 +491,20 @@ public class VideoMenuUI : IInitializable, IDisposable
 
         _bsmlParserParams.EmitEvent("update-customize-offset");
         UpdateRevertOffsetButton();
+        UpdateAutoSyncButton();
+    }
+
+    private void UpdateAutoSyncButton()
+    {
+        // Already destroyed when this runs from Dispose while the game closes
+        if (_autoSyncButton == null) return;
+
+        var active = _currentVideo != null && CustomizeOffset && !_editorBeatmapSelected &&
+                     _currentLevel != null && !VideoLoader.IsDlcSong(_currentLevel);
+        _autoSyncButton.gameObject.SetActive(active);
+        _autoSyncButton.interactable = active && _currentVideo?.DownloadState == DownloadState.Downloaded &&
+                                       _autoSyncCts == null;
+        _autoSyncButtonText.text = _autoSyncCts != null ? "Syncing..." : "Auto sync";
     }
 
     private void UpdateRevertOffsetButton()
@@ -605,6 +682,8 @@ public class VideoMenuUI : IInitializable, IDisposable
 
     public void HandleDidSelectEditorBeatmap(BeatmapDataModel beatmapData, string originalPath)
     {
+        _editorBeatmapSelected = true;
+        CancelAutoSync();
         if (!_config.TheaterActive) return;
 
         _playbackManager.StopPreview(true);
@@ -624,6 +703,8 @@ public class VideoMenuUI : IInitializable, IDisposable
         //Ignores the duplicate event that occurs when selecting a playlist song
         if (_currentLevel == level && _currentLevelIsPlaylistSong) return;
 
+        CancelAutoSync();
+        _editorBeatmapSelected = false;
         _currentLevelIsPlaylistSong = InstalledMods.BeatSaberPlaylistsLib && level.IsPlaylistLevel();
         if (InstalledMods.BeatSaberPlaylistsLib && _currentLevelIsPlaylistSong)
             level = level.GetLevelFromPlaylistIfAvailable();
@@ -686,6 +767,7 @@ public class VideoMenuUI : IInitializable, IDisposable
 
     public void OnConfigChanged(VideoConfig? config)
     {
+        CancelAutoSync();
         _currentVideo = config;
         SetupVideoDetails();
     }
@@ -699,6 +781,7 @@ public class VideoMenuUI : IInitializable, IDisposable
 
     public void StatusViewerDidDisable(object sender, EventArgs e)
     {
+        CancelAutoSync();
         _videoMenuActive = false;
         CloseDisplaySettings(false);
         if (_currentVideo?.NeedsToSave == true) _videoLoader.SaveVideoConfig(_currentVideo);
@@ -841,6 +924,7 @@ public class VideoMenuUI : IInitializable, IDisposable
     [UsedImplicitly]
     private void OnDeleteVideoAction()
     {
+        CancelAutoSync();
         if (_currentVideo == null)
         {
             _loggingService.Warn("Current video was null on delete action");
@@ -881,6 +965,7 @@ public class VideoMenuUI : IInitializable, IDisposable
     [UsedImplicitly]
     private void OnDeleteConfigAction()
     {
+        CancelAutoSync();
         if (_currentVideo == null || _currentLevel == null)
         {
             _loggingService.Warn("Failed to delete config: Either currentVideo or currentLevel is null");
@@ -1058,6 +1143,325 @@ public class VideoMenuUI : IInitializable, IDisposable
         ChangeOffset(originalOffset.Value - _currentVideo.offset);
     }
 
+    #region Auto sync
+
+    private static void SetAutoSyncTextWidth(TextMeshProUGUI text, float width)
+    {
+        var layout = text.GetComponent<LayoutElement>();
+        if (layout == null) layout = text.gameObject.AddComponent<LayoutElement>();
+        layout.preferredWidth = width;
+    }
+
+    [UIAction("on-auto-sync-action")]
+    [UsedImplicitly]
+    private void OnAutoSyncAction()
+    {
+        if (_autoSyncCts != null || _currentVideo == null || _currentLevel == null || _autoSyncPopupOpen) return;
+
+        var mapPath = _videoLoader.GetMapPath(_currentLevel);
+        var songPath = mapPath == null ? null : MapSongFile.Find(mapPath);
+        if (songPath == null)
+        {
+            ShowAutoSyncMessage("Auto sync failed", "Couldn't find this map's song file.");
+            return;
+        }
+
+        var videoPath = _currentVideo.GetVideoPathForFormat(_config.Format);
+        if (videoPath == null || !File.Exists(videoPath))
+        {
+            ShowAutoSyncMessage("Auto sync failed", "Couldn't find the downloaded video file.");
+            return;
+        }
+
+        _autoSyncVideo = _currentVideo;
+        _autoSyncCts = new CancellationTokenSource();
+        var token = _autoSyncCts.Token;
+        var speed = _currentVideo.PlaybackSpeed;
+        UpdateAutoSyncButton();
+
+        _loggingService.Info($"Auto sync: analysing {songPath} against {videoPath} at {speed:0.00}x");
+        RunAutoSync(songPath, videoPath, speed, token).LogErrors(_loggingService, "Auto sync");
+    }
+
+    private async Task RunAutoSync(string songPath, string videoPath, float speed, CancellationToken token)
+    {
+        // The run owns this source even if a context change clears the field.
+        var runCts = _autoSyncCts!;
+        try
+        {
+            var ffmpegPath = Path.Combine(TheaterFileHelpers.TheaterLibsPath, "ffmpeg.exe");
+            var result = await SyncAnalyzer.AnalyzeAsync(ffmpegPath, songPath, videoPath, speed, token);
+            if (token.IsCancellationRequested || _currentVideo != _autoSyncVideo || _currentVideo == null) return;
+
+            if (!Mathf.Approximately(_currentVideo.PlaybackSpeed, speed))
+            {
+                ShowAutoSyncMessage("Auto sync failed", "The playback speed changed while syncing. Press Auto sync again.");
+                return;
+            }
+
+            var candidates = string.Join(", ", result.Candidates.Select(candidate =>
+                string.Format(CultureInfo.InvariantCulture, "{0:+0;-0;0} ms ({1:0.00})", candidate.OffsetMs, candidate.Score)));
+            _loggingService.Info(string.Format(CultureInfo.InvariantCulture,
+                "Auto sync: {0}, best {1:0} ms, score {2:0.00}, margin {3:0.00}, agreement {4:P0}, exact slices {5}, {6} ms; candidates: {7}",
+                result.Confidence, result.OffsetMs, result.Score, result.Margin, result.Agreement, result.ExactSlices,
+                result.TotalMs, candidates));
+            ShowAutoSyncResults(result);
+        }
+        catch (OperationCanceledException)
+        {
+            _loggingService.Debug("Auto sync cancelled");
+        }
+        catch (SyncException e)
+        {
+            _loggingService.Warn($"Auto sync failed: {e.Message}");
+            if (!token.IsCancellationRequested && _currentVideo == _autoSyncVideo)
+                ShowAutoSyncMessage("Auto sync failed", e.Message);
+        }
+        catch (Exception e)
+        {
+            _loggingService.Error(e);
+            if (!token.IsCancellationRequested && _currentVideo == _autoSyncVideo)
+                ShowAutoSyncMessage("Auto sync failed", "Something went wrong. See the log for details.");
+        }
+        finally
+        {
+            runCts.Dispose();
+            if (ReferenceEquals(_autoSyncCts, runCts))
+            {
+                _autoSyncCts = null;
+                UpdateAutoSyncButton();
+            }
+        }
+    }
+
+    private static string FormatOffset(int ms) => ms.ToString("+#,0;-#,0;0") + " ms";
+
+    private static string FormatSongTime(double s)
+    {
+        var total = (int)Math.Floor(s);
+        return $"{total / 60}:{total % 60:00}";
+    }
+
+    private void OpenAutoSyncPopup()
+    {
+        if (_autoSyncModal == null) return;
+
+        _autoSyncPopupOpen = true;
+        _bsmlParserParams.EmitEvent("show-auto-sync");
+    }
+
+    private void HideAutoSyncPopup()
+    {
+        _autoSyncPopupOpen = false;
+        _bsmlParserParams.EmitEvent("hide-auto-sync");
+        _autoSyncTriedIndex = -1;
+        _autoSyncOffsets.Clear();
+        _autoSyncVideo = null;
+        _autoSyncTryStart = null;
+    }
+
+    private void ShowAutoSyncMessage(string title, string body)
+    {
+        if (_currentVideo == null) return;
+
+        _autoSyncTitle.text = title;
+        _autoSyncSubtitle.text = body + "\n<color=#A0A8B4>Your offset was not changed.</color>";
+        _autoSyncRows.SetActive(false);
+        _autoSyncOffsets.Clear();
+        _autoSyncTriedIndex = -1;
+        _autoSyncStartOffset = _currentVideo.offset;
+        _autoSyncVideo = _currentVideo;
+        OpenAutoSyncPopup();
+    }
+
+    private void ShowAutoSyncResults(SyncResult result)
+    {
+        if (_currentVideo == null) return;
+        if (result.Confidence == SyncConfidence.None || result.Candidates.Count == 0)
+        {
+            ShowAutoSyncMessage("Auto sync couldn't find this song in the video",
+                "It may be a different version (live, remix, mashup) or a different speed.");
+            return;
+        }
+
+        _autoSyncStartOffset = _currentVideo.offset;
+        _autoSyncTriedIndex = -1;
+        _autoSyncVideo = _currentVideo;
+        _autoSyncConfidence = result.Confidence;
+        var count = Math.Min(result.Candidates.Count, _autoSyncRowControls.Length);
+        _autoSyncOffsets.Clear();
+        _autoSyncOffsets.AddRange(result.Candidates.Take(count).Select(candidate => (int)Math.Round(candidate.OffsetMs)));
+
+        _autoSyncTitle.text = count == 1 ? "Auto sync found 1 match" : $"Auto sync found {count} matches";
+        SetIdleSubtitle();
+        _autoSyncRows.SetActive(true);
+
+        for (var i = 0; i < _autoSyncRowControls.Length; i++)
+        {
+            var row = _autoSyncRowControls[i];
+            row.Row.SetActive(i < count);
+            if (i >= count) continue;
+
+            var offset = _autoSyncOffsets[i];
+            row.Tag.text = i switch
+            {
+                0 when _autoSyncConfidence == SyncConfidence.Strong => "<color=#78DC8C>SURE</color>",
+                0 => "<color=#F0C85A>BEST GUESS</color>",
+                _ => "<color=#A0A8B4>unlikely</color>"
+            };
+            var pct = Mathf.Clamp(Mathf.RoundToInt(result.Candidates[i].Score * 100f), 0, 100);
+            var delta = offset == _autoSyncStartOffset
+                ? "same as current"
+                : $"{FormatOffset(offset - _autoSyncStartOffset)} from current";
+            row.Info.text = $"<color=#A0A8B4>match {pct}%   {delta}</color>";
+            row.Apply.interactable = true;
+        }
+
+        var showNote = _autoSyncConfidence == SyncConfidence.Unsure &&
+                       result.Agreement < SyncSettings.StrongMinAgreement && result.MatchedRanges.Count > 0;
+        _autoSyncNote.gameObject.SetActive(showNote);
+        if (showNote)
+        {
+            var ranges = string.Join(", ", result.MatchedRanges.Take(2).Select(range =>
+                $"{FormatSongTime(range.StartSeconds)}-{FormatSongTime(range.EndSeconds)}"));
+            _autoSyncNote.text = "partial: " + ranges + (result.MatchedRanges.Count > 2 ? ", ..." : "");
+        }
+
+        _autoSyncTryStart = result.MatchedRanges.Count > 0 ? (float)result.MatchedRanges[0].StartSeconds : null;
+        UpdateAutoSyncTryRows();
+        OpenAutoSyncPopup();
+    }
+
+    private void SetIdleSubtitle()
+    {
+        var confidence = _autoSyncConfidence == SyncConfidence.Strong
+            ? "<color=#78DC8C>Best match is sure</color>"
+            : "<color=#F0C85A>Not sure, try them by ear</color>";
+        _autoSyncSubtitle.text = $"Current offset: {FormatOffset(_autoSyncStartOffset)}   {confidence}";
+    }
+
+    private void UpdateAutoSyncTryRows()
+    {
+        for (var i = 0; i < _autoSyncOffsets.Count; i++)
+        {
+            var row = _autoSyncRowControls[i];
+            var trying = i == _autoSyncTriedIndex;
+            var offset = FormatOffset(_autoSyncOffsets[i]);
+            row.Offset.text = trying ? $"<color=#00BEFF>{offset}</color>" : offset;
+            row.TryText.text = trying ? "Trying" : "Try";
+            row.Try.interactable = !trying;
+        }
+    }
+
+    [UIAction("on-auto-sync-try-0")]
+    [UsedImplicitly]
+    private void OnAutoSyncTry0() => TryAutoSync(0);
+
+    [UIAction("on-auto-sync-try-1")]
+    [UsedImplicitly]
+    private void OnAutoSyncTry1() => TryAutoSync(1);
+
+    [UIAction("on-auto-sync-try-2")]
+    [UsedImplicitly]
+    private void OnAutoSyncTry2() => TryAutoSync(2);
+
+    private void TryAutoSync(int i)
+    {
+        if (!_autoSyncPopupOpen || _currentVideo == null || _currentVideo != _autoSyncVideo ||
+            i >= _autoSyncOffsets.Count) return;
+
+        var offset = _autoSyncOffsets[i];
+        _currentVideo.offset = offset;
+        _autoSyncTriedIndex = i;
+
+        var speed = _currentVideo.PlaybackSpeed;
+        var kickIn = offset < 0 ? (-offset / 1000f) / speed : 0f;
+        var start = Math.Max(kickIn, i == 0 ? _autoSyncTryStart ?? 0f : 0f);
+        if (_currentLevel != null && _currentLevel.songDuration > 0)
+            start = Math.Min(start, Math.Max(0f, _currentLevel.songDuration - 10f));
+
+        if (_playbackManager.IsPreviewPlaying) _playbackManager.StopPreview(true);
+        _playbackManager.StartPreview(start).LogErrors(_loggingService, "Auto sync preview");
+
+        UpdateAutoSyncTryRows();
+        _autoSyncSubtitle.text = $"Trying {FormatOffset(offset)}. Close goes back to {FormatOffset(_autoSyncStartOffset)}.";
+        _loggingService.Info($"Auto sync: trying {offset} ms from song time {start:0.0} s");
+    }
+
+    [UIAction("on-auto-sync-apply-0")]
+    [UsedImplicitly]
+    private void OnAutoSyncApply0() => ApplyAutoSync(0);
+
+    [UIAction("on-auto-sync-apply-1")]
+    [UsedImplicitly]
+    private void OnAutoSyncApply1() => ApplyAutoSync(1);
+
+    [UIAction("on-auto-sync-apply-2")]
+    [UsedImplicitly]
+    private void OnAutoSyncApply2() => ApplyAutoSync(2);
+
+    private void ApplyAutoSync(int i)
+    {
+        if (!_autoSyncPopupOpen || _currentVideo == null || _currentVideo != _autoSyncVideo ||
+            i >= _autoSyncOffsets.Count) return;
+
+        var target = _autoSyncOffsets[i];
+        var playerOffset = _autoSyncTriedIndex >= 0 ? _autoSyncOffsets[_autoSyncTriedIndex] : _autoSyncStartOffset;
+
+        // Revert sync needs the offset from before any temporary preview.
+        _currentVideo.offset = _autoSyncStartOffset;
+        RecordOriginalSync(_currentVideo);
+        _currentVideo.offset = target;
+        _currentVideo.NeedsToSave = true;
+
+        if (_playbackManager.IsPreviewPlaying && target != playerOffset)
+            _playbackManager.ApplyOffset(target - playerOffset);
+
+        _loggingService.Info($"Auto sync: applied {target} ms (was {_autoSyncStartOffset} ms)");
+        HideAutoSyncPopup();
+        UpdateOffsetControls();
+        _previewButtonText.text = _playbackManager.IsPreviewPlaying ? "Stop preview" : "Preview";
+    }
+
+    [UIAction("on-auto-sync-close")]
+    [UsedImplicitly]
+    private void CloseAutoSyncPopup()
+    {
+        if (!_autoSyncPopupOpen) return;
+
+        if (_autoSyncTriedIndex >= 0 && _autoSyncVideo != null)
+        {
+            _autoSyncVideo.offset = _autoSyncStartOffset;
+            try
+            {
+                if (_playbackManager.IsPreviewPlaying) _playbackManager.StopPreview(true);
+            }
+            catch (Exception exception)
+            {
+                // This can happen when closing the game, as in StatusViewerDidDisable
+                _loggingService.Debug(exception);
+            }
+        }
+
+        HideAutoSyncPopup();
+        if (_currentVideo != null) UpdateOffsetControls();
+        _previewButtonText.text = _playbackManager.IsPreviewPlaying ? "Stop preview" : "Preview";
+    }
+
+    private void CancelAutoSync()
+    {
+        if (_autoSyncCts != null)
+        {
+            _autoSyncCts.Cancel();
+            _autoSyncCts = null;
+            UpdateAutoSyncButton();
+        }
+
+        if (_autoSyncPopupOpen) CloseAutoSyncPopup();
+    }
+
+    #endregion
+
     #region Display view
 
     [UIValue("display-theater-enabled")]
@@ -1152,6 +1556,7 @@ public class VideoMenuUI : IInitializable, IDisposable
 
     private void OnTheaterEnabledChanged(bool enabled)
     {
+        CancelAutoSync();
         if (enabled)
         {
             // Load the selected level again, now that Theater is on

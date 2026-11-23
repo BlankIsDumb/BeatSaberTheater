@@ -90,11 +90,60 @@
                 <horizontal horizontal-fit='PreferredSize' align='Center' spacing='2'>
                     <button id='preview-button' hover-hint='Left ear is the video, right ear is the map' text='Preview'
                             on-click='on-preview-action'/>
+                    <button id='auto-sync-button' text='Auto sync' on-click='on-auto-sync-action'
+                            hover-hint="Finds the offset by matching the video's sound to the song."/>
                     <button id='revert-offset-button' text='Revert sync' on-click='on-revert-offset-action'
                             hover-hint='Go back to the offset and speed this video had before you changed them.'/>
                 </horizontal>
             </vertical>
         </vertical>
+        <modal id='auto-sync-modal' show-event='show-auto-sync' hide-event='hide-auto-sync' click-off-closes='false'
+               move-to-center='true' size-delta-x='112' size-delta-y='66'>
+            <vertical pad='3' spacing='1' child-expand-height='false' child-control-height='true'
+                      vertical-fit='PreferredSize' preferred-width='112'>
+                <text id='auto-sync-title' font-size='4.5' align='Center' text='Auto sync found 3 matches'/>
+                <text id='auto-sync-subtitle' font-size='3' align='Center' word-wrapping='true'
+                      text='Current offset: 0 ms'/>
+                <vertical id='auto-sync-rows' spacing='1' child-expand-height='false' vertical-fit='PreferredSize'>
+                    <!-- Only the best match can show the partial-match note. -->
+                    <horizontal id='auto-sync-row-0' preferred-width='106' horizontal-fit='PreferredSize' spacing='2'
+                                child-expand-width='false' child-align='MiddleLeft'>
+                        <text id='auto-sync-offset-0' font-size='4' align='Left' text='0 ms'/>
+                        <vertical preferred-width='46' spacing='0' child-expand-height='false' vertical-fit='PreferredSize'>
+                            <text id='auto-sync-tag-0' font-size='3' align='Left' text='SURE'/>
+                            <text id='auto-sync-info-0' font-size='2.6' align='Left' text='match 0%'/>
+                            <text id='auto-sync-note-0' font-size='2.6' align='Left' color='#F0C85A' text='partial'/>
+                        </vertical>
+                        <button id='auto-sync-try-0' text='Try' font-size='3' pref-width='13' on-click='on-auto-sync-try-0'/>
+                        <button id='auto-sync-apply-0' text='Apply' font-size='3' pref-width='13'
+                                on-click='on-auto-sync-apply-0'/>
+                    </horizontal>
+                    <horizontal id='auto-sync-row-1' preferred-width='106' horizontal-fit='PreferredSize' spacing='2'
+                                child-expand-width='false' child-align='MiddleLeft'>
+                        <text id='auto-sync-offset-1' font-size='4' align='Left' text='0 ms'/>
+                        <vertical preferred-width='46' spacing='0' child-expand-height='false' vertical-fit='PreferredSize'>
+                            <text id='auto-sync-tag-1' font-size='3' align='Left' text='SURE'/>
+                            <text id='auto-sync-info-1' font-size='2.6' align='Left' text='match 0%'/>
+                        </vertical>
+                        <button id='auto-sync-try-1' text='Try' font-size='3' pref-width='13' on-click='on-auto-sync-try-1'/>
+                        <button id='auto-sync-apply-1' text='Apply' font-size='3' pref-width='13'
+                                on-click='on-auto-sync-apply-1'/>
+                    </horizontal>
+                    <horizontal id='auto-sync-row-2' preferred-width='106' horizontal-fit='PreferredSize' spacing='2'
+                                child-expand-width='false' child-align='MiddleLeft'>
+                        <text id='auto-sync-offset-2' font-size='4' align='Left' text='0 ms'/>
+                        <vertical preferred-width='46' spacing='0' child-expand-height='false' vertical-fit='PreferredSize'>
+                            <text id='auto-sync-tag-2' font-size='3' align='Left' text='SURE'/>
+                            <text id='auto-sync-info-2' font-size='2.6' align='Left' text='match 0%'/>
+                        </vertical>
+                        <button id='auto-sync-try-2' text='Try' font-size='3' pref-width='13' on-click='on-auto-sync-try-2'/>
+                        <button id='auto-sync-apply-2' text='Apply' font-size='3' pref-width='13'
+                                on-click='on-auto-sync-apply-2'/>
+                    </horizontal>
+                </vertical>
+                <button id='auto-sync-close' text='Close' on-click='on-auto-sync-close'/>
+            </vertical>
+        </modal>
     </bg>
 
     <bg id='video-search-results'>

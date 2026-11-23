@@ -36,6 +36,7 @@ public class PlaybackManager : MonoBehaviour
     private float _offsetAfterPrepare;
     private Stopwatch? _playbackDelayStopwatch;
     private IEnumerator? _prepareVideoCoroutine;
+    private int _previewGeneration;
     private float _previewStartTime;
     private DateTime _previewSyncStartTime;
     private float _previewTimeRemaining;
@@ -909,7 +910,7 @@ public class PlaybackManager : MonoBehaviour
         }
     }
 
-    public async Task StartPreview()
+    public async Task StartPreview(float? songStartTime = null)
     {
         if (_videoConfig == null || _currentLevel == null)
         {
@@ -926,6 +927,7 @@ public class PlaybackManager : MonoBehaviour
         {
             _loggingService.Debug("Starting preview");
             IsPreviewPlaying = true;
+            var generation = _previewGeneration;
 
             if (_videoPlayer.IsPlaying) StopPlayback();
 
@@ -934,6 +936,7 @@ public class PlaybackManager : MonoBehaviour
             // Start the preview at the point the video kicks in
             var startTime = 0f;
             if (_videoConfig.offset < 0) startTime = -_videoConfig.GetOffsetInSec() / _videoConfig.PlaybackSpeed;
+            if (songStartTime != null) startTime = Math.Max(0f, songStartTime.Value);
 
             if (_songPreviewPlayer == null)
             {
@@ -945,6 +948,8 @@ public class PlaybackManager : MonoBehaviour
             {
                 _loggingService.Debug($"Preview start time: {startTime}, offset: {_videoConfig.GetOffsetInSec()}");
                 var audioClip = await VideoLoader.GetAudioClipForLevel(_currentLevel);
+                // Stopped (or stopped and restarted) while the clip loaded: that newer call owns the preview now
+                if (generation != _previewGeneration) return;
                 if (audioClip != null)
                     _songPreviewPlayer.CrossfadeTo(audioClip, -5f, startTime,
                         _currentLevel.songDuration, null);
@@ -992,6 +997,7 @@ public class PlaybackManager : MonoBehaviour
     {
         if (!IsPreviewPlaying) return;
         _loggingService.Debug($"Stopping preview (stop audio source: {stopPreviewMusic}");
+        _previewGeneration++;
 
         _videoPlayer.FadeOut();
         StopAllCoroutines();
