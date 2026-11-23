@@ -235,6 +235,13 @@ public class VideoMenuUI : IInitializable, IDisposable
         var titleButtons = (RectTransform)_titleButtons.transform;
         titleButtons.pivot = new Vector2(1f, 0.5f);
         titleButtons.localScale = new Vector3(0.5f, 0.5f, 1f);
+        // Pin the title to its 82-unit slot. BSML's text tag ignores preferred-width, so the title took the width of
+        // the video name and pushed the gear and trash buttons around.
+        var titleLayout = _videoTitleText.GetComponent<LayoutElement>();
+        if (titleLayout == null) titleLayout = _videoTitleText.gameObject.AddComponent<LayoutElement>();
+        titleLayout.minWidth = 82f;
+        titleLayout.preferredWidth = 82f;
+        titleLayout.flexibleWidth = 0f;
 
         _searchKeyboard.ClearOnOpen = false;
 
@@ -1414,8 +1421,8 @@ public class VideoMenuUI : IInitializable, IDisposable
         _currentVideo.offset = target;
         _currentVideo.NeedsToSave = true;
 
-        if (_playbackManager.IsPreviewPlaying && target != playerOffset)
-            _playbackManager.ApplyOffset(target - playerOffset);
+        // Like the offset buttons: also moves the video that plays behind the song select, not just Preview
+        if (target != playerOffset) _playbackManager.ApplyOffset(target - playerOffset);
 
         _loggingService.Info($"Auto sync: applied {target} ms (was {_autoSyncStartOffset} ms)");
         HideAutoSyncPopup();

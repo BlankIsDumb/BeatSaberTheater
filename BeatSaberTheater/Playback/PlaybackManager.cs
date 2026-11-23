@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -46,6 +47,12 @@ public class PlaybackManager : MonoBehaviour
     private SongPreviewPlayer? _songPreviewPlayer;
     private float _songSpeed = 1f;
     private bool _speedPendingFirstFrame;
+    private int _syncCheckCount;
+    private double _syncCheckMax;
+    private double _syncCheckMin;
+    private float _syncCheckPlayStart;
+    private double _syncCheckSum;
+    private float _syncCheckWindowStart;
     private AudioTimeSyncController? _timeSyncController;
     private VideoConfig? _videoConfig;
     private CustomVideoPlayer _videoPlayer = null!;
@@ -213,6 +220,8 @@ public class PlaybackManager : MonoBehaviour
                                   TheaterFileHelpers.FormatFloat(audioSourceTime) + " - Error (ms): " +
                                   Math.Round(error * 1000));
 
+        if (_videoPlayer.IsPlaying && !_videoPlayer.IsSyncing) RecordSyncCheck(-error, audioSourceTime);
+
         if (_videoConfig.endVideoAt.HasValue)
         {
             if (referenceTime >= _videoConfig.endVideoAt - 1f)
@@ -229,7 +238,7 @@ public class PlaybackManager : MonoBehaviour
 
         if (Math.Abs(audioSourceTime - _lastKnownAudioSourceTime) > 0.3f && _videoPlayer.IsPlaying)
         {
-            _loggingService.Debug("Detected AudioSource seek, resyncing...");
+            _loggingService.Info("Detected AudioSource seek, resyncing...");
             ResyncVideo();
         }
 
@@ -239,12 +248,46 @@ public class PlaybackManager : MonoBehaviour
             //Audio can intentionally go out of sync when the level fails for example. Don't resync the video in that case.
             if (_timeSyncController != null && !_timeSyncController.forcedNoAudioSync)
             {
-                _loggingService.Debug(
+                _loggingService.Info(
                     $"Detected desync (reference {referenceTime}, actual {playerTime}), resyncing...");
                 ResyncVideo();
             }
 
         if (audioSourceTime > 0) _lastKnownAudioSourceTime = audioSourceTime;
+    }
+
+    // Logs how far the video is from the song at Info level, so a release build's log shows real sync error.
+    // Averaged per window, since both clocks only move in steps of a video frame or an audio buffer.
+    private void RecordSyncCheck(double aheadSeconds, float songTime)
+    {
+        var aheadMs = aheadSeconds * 1000;
+        // Delayed starts and loop points show up as huge jumps; they aren't sync error
+        if (Math.Abs(aheadMs) > 5000) return;
+
+        var now = Time.realtimeSinceStartup;
+        if (_syncCheckCount == 0)
+        {
+            _syncCheckWindowStart = now;
+            _syncCheckMin = double.MaxValue;
+            _syncCheckMax = double.MinValue;
+            _syncCheckSum = 0;
+        }
+
+        _syncCheckSum += aheadMs;
+        _syncCheckCount++;
+        _syncCheckMin = Math.Min(_syncCheckMin, aheadMs);
+        _syncCheckMax = Math.Max(_syncCheckMax, aheadMs);
+
+        // 1 s windows show the start in detail, 5 s windows after that keep a whole song readable
+        var sincePlay = now - _syncCheckPlayStart;
+        if (now - _syncCheckWindowStart < (sincePlay < 10f ? 1f : 5f)) return;
+
+        var mode = IsPreviewPlaying ? "preview" : _activeScene == Scene.Menu ? "menu" : "song";
+        _loggingService.Info(string.Format(CultureInfo.InvariantCulture,
+            "Sync check ({0}, {1:0.0} s in, song at {2:0.0} s): video {3:+0;-0;0} ms ahead of the song " +
+            "(min {4:+0;-0;0}, max {5:+0;-0;0}, {6} frames)",
+            mode, sincePlay, songTime, _syncCheckSum / _syncCheckCount, _syncCheckMin, _syncCheckMax, _syncCheckCount));
+        _syncCheckCount = 0;
     }
 
     private void GameSceneActive()
@@ -577,6 +620,9 @@ public class PlaybackManager : MonoBehaviour
             $"Total offset: {totalOffset}, startTime: {startTime}, songSpeed: {_songSpeed}, PlaybackSpeed: {_videoConfig.PlaybackSpeed}, player time: {_videoPlayer.PlayerTime}");
 
         StopAllCoroutines();
+
+        _syncCheckPlayStart = Time.realtimeSinceStartup;
+        _syncCheckCount = 0;
 
         if (_activeAudioSource != null && _activeAudioSource.time > 0)
             _lastKnownAudioSourceTime = _activeAudioSource.time;
