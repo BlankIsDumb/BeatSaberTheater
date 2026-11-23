@@ -6,3 +6,4 @@ riderModule.iml
 .idea/
 BeatSaberTheater.csproj.user
 BeatSaberTheater.sln.DotSettings.user
+Tools/SyncHarness/out/
