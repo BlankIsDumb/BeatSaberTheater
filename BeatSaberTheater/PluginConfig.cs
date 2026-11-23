@@ -30,6 +30,14 @@ public class PluginConfig
     public virtual int BloomIntensity { get; set; } = 100;
     public virtual float CornerRoundness { get; set; }
 
+    // How far ahead of the song the video picture is shown, in ms, to make up for the delay before the picture is
+    // visible. Not applied to Preview. Most setups keep the default.
+    public virtual int VideoLeadMs { get; set; } = 67;
+
+    // Learned: how much earlier (ms) a delayed video start calls Play(), to make up for the player's start-up delay.
+    // Updated by PlaybackManager after each delayed start. Not shown in the UI.
+    public virtual int StartDelayCompensationMs { get; set; } = 0;
+
     // Display settings, in percent. See Settings/DisplaySettings.cs for ranges.
     public virtual int ScreenBrightness { get; set; } = 100;
     public virtual int ScreenScale { get; set; } = 100;

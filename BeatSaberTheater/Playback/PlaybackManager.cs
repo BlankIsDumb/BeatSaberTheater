@@ -47,6 +47,26 @@ public class PlaybackManager : MonoBehaviour
     private SongPreviewPlayer? _songPreviewPlayer;
     private float _songSpeed = 1f;
     private bool _speedPendingFirstFrame;
+
+    private enum StartSyncPhase
+    {
+        Off,
+        WaitingForFirstFrame,
+        Measuring,
+        Nudging,
+        Done
+    }
+
+    private StartSyncPhase _startSyncPhase;
+    private bool _startSyncDelayedStart;
+    private float _startSyncFirstFrameTime;
+    private float _startSyncNudgeEndTime;
+    private readonly double[] _startSyncSamples = new double[6];
+    private int _startSyncSampleCount;
+    private double _startSyncFirstErrorMs;
+    private bool _startSyncLearned;
+    private float? _firstNoteSongTime;
+
     private int _syncCheckCount;
     private double _syncCheckMax;
     private double _syncCheckMin;
@@ -204,14 +224,28 @@ public class PlaybackManager : MonoBehaviour
 
         var audioSourceTime = _activeAudioSource.time;
 
-        if (_videoPlayer.IsFading) return;
+        if (_videoPlayer.IsFading)
+        {
+            // Keep the last known song time current during fades, or the first frame after a fade looks like a seek
+            if (_activeAudioSource.isPlaying && audioSourceTime > 0) _lastKnownAudioSourceTime = audioSourceTime;
+            StartSyncStep(audioSourceTime);
+            return;
+        }
 
         var playerTime = _videoPlayer.PlayerTime;
+        var targetTime = GetTargetTime();
         var referenceTime = GetReferenceTime();
-        if (_videoPlayer.VideoDuration > 0) referenceTime %= _videoPlayer.VideoDuration;
-        var error = referenceTime - playerTime;
+        var videoDuration = _videoPlayer.VideoDuration;
+        if (videoDuration > 0)
+        {
+            targetTime %= videoDuration;
+            referenceTime %= videoDuration;
+        }
+        var error = targetTime - playerTime;
 
         if (!_activeAudioSource.isPlaying) return;
+
+        StartSyncStep(audioSourceTime);
 
         if (frame % 120 == 0)
             _loggingService.Debug("Frame: " + frame + " - Player: " +
@@ -220,7 +254,7 @@ public class PlaybackManager : MonoBehaviour
                                   TheaterFileHelpers.FormatFloat(audioSourceTime) + " - Error (ms): " +
                                   Math.Round(error * 1000));
 
-        if (_videoPlayer.IsPlaying && !_videoPlayer.IsSyncing) RecordSyncCheck(-error, audioSourceTime);
+        if (_videoPlayer.IsPlaying && !_videoPlayer.IsSyncing) RecordSyncCheck(playerTime - referenceTime, audioSourceTime);
 
         if (_videoConfig.endVideoAt.HasValue)
         {
@@ -243,13 +277,13 @@ public class PlaybackManager : MonoBehaviour
         }
 
         //Sync if the error exceeds a threshold, but not if the video is close to the looping point
-        if (Math.Abs(error) > 0.3f && Math.Abs(_videoPlayer.VideoDuration - playerTime) > 0.5f &&
+        if (Math.Abs(error) > 0.3f && Math.Abs(videoDuration - playerTime) > 0.5f &&
             _videoPlayer.IsPlaying)
             //Audio can intentionally go out of sync when the level fails for example. Don't resync the video in that case.
             if (_timeSyncController != null && !_timeSyncController.forcedNoAudioSync)
             {
                 _loggingService.Info(
-                    $"Detected desync (reference {referenceTime}, actual {playerTime}), resyncing...");
+                    $"Detected desync (target {targetTime}, actual {playerTime}), resyncing...");
                 ResyncVideo();
             }
 
@@ -282,11 +316,11 @@ public class PlaybackManager : MonoBehaviour
         var sincePlay = now - _syncCheckPlayStart;
         if (now - _syncCheckWindowStart < (sincePlay < 10f ? 1f : 5f)) return;
 
-        var mode = IsPreviewPlaying ? "preview" : _activeScene == Scene.Menu ? "menu" : "song";
         _loggingService.Info(string.Format(CultureInfo.InvariantCulture,
             "Sync check ({0}, {1:0.0} s in, song at {2:0.0} s): video {3:+0;-0;0} ms ahead of the song " +
-            "(min {4:+0;-0;0}, max {5:+0;-0;0}, {6} frames)",
-            mode, sincePlay, songTime, _syncCheckSum / _syncCheckCount, _syncCheckMin, _syncCheckMax, _syncCheckCount));
+            "(target {4:+0;-0;0}, min {5:+0;-0;0}, max {6:+0;-0;0}, {7} frames)",
+            SyncCheckMode, sincePlay, songTime, _syncCheckSum / _syncCheckCount, LeadVideoSeconds * 1000,
+            _syncCheckMin, _syncCheckMax, _syncCheckCount));
         _syncCheckCount = 0;
     }
 
@@ -297,6 +331,7 @@ public class PlaybackManager : MonoBehaviour
 
     public void GameSceneLoaded()
     {
+        CancelStartSync();
         StopAllCoroutines();
         _loggingService.Info("GameSceneLoaded");
 
@@ -430,6 +465,7 @@ public class PlaybackManager : MonoBehaviour
     {
         _loggingService.Info("MenuSceneLoaded");
         _activeScene = Scene.Menu;
+        _firstNoteSongTime = null;
         _videoPlayer.Hide();
         _videoPlayer.ResetScreens();
         StopAllCoroutines();
@@ -555,10 +591,18 @@ public class PlaybackManager : MonoBehaviour
 
     private float TargetVideoSpeed => _songSpeed * (_videoConfig?.PlaybackSpeed ?? 1f);
 
+    // Lead in video seconds. Preview keeps a target of 0, since it compares two audio streams.
+    private float LeadVideoSeconds => IsPreviewPlaying ? 0f : _config.VideoLeadMs / 1000f * TargetVideoSpeed;
+
+    private float GetTargetTime() => GetReferenceTime() + LeadVideoSeconds;
+
+    private string SyncCheckMode => IsPreviewPlaying ? "preview" : _activeScene == Scene.Menu ? "menu" : "song";
+
     private float VideoToRealSeconds(float videoSeconds) => videoSeconds / Math.Max(0.01f, TargetVideoSpeed);
 
     private void PlayVideo(float startTime)
     {
+        CancelStartSync();
         if (_videoConfig == null)
         {
             _loggingService.Warn("VideoConfig null in PlayVideo");
@@ -600,8 +644,8 @@ public class PlaybackManager : MonoBehaviour
             _speedPendingFirstFrame = false;
         }
 
-        // Video seemingly always lags behind. A fixed offset seems to work well enough
-        if (!IsPreviewPlaying) totalOffset += 0.0667f;
+        // Start at the configured picture lead. Preview keeps its audio-to-audio target.
+        totalOffset += LeadVideoSeconds;
 
         if (_videoConfig.endVideoAt != null && totalOffset > _videoConfig.endVideoAt)
             totalOffset = _videoConfig.endVideoAt.Value;
@@ -633,11 +677,15 @@ public class PlaybackManager : MonoBehaviour
                 // Wait in real time until the video clock would reach zero.
                 StartCoroutine(PlayVideoDelayedCoroutine(VideoToRealSeconds(-totalOffset)));
             else
+            {
                 // In menus we don't need to wait, instead the preview player starts earlier
+                ArmStartSync(delayedStart: false);
                 _videoPlayer.Play();
+            }
         }
         else
         {
+            ArmStartSync(delayedStart: false);
             _videoPlayer.Play();
             if (!_videoPlayer.PlayerIsPrepared)
             {
@@ -659,16 +707,18 @@ public class PlaybackManager : MonoBehaviour
     }
 
     // TODO: Using a stopwatch will not work properly when seeking in the map (e.g. IntroSkip, PracticePlugin)
-    private IEnumerator PlayVideoDelayedCoroutine(float delayStartTime)
+    private IEnumerator PlayVideoDelayedCoroutine(float delayStartTime, bool armStartSync = true)
     {
-        _loggingService.Debug("Waiting for " + delayStartTime + " seconds before playing video");
+        var compensationMs = _config.StartDelayCompensationMs;
+        var waitSeconds = Math.Max(0f, delayStartTime - compensationMs / 1000f);
+        _loggingService.Debug(
+            $"Waiting for {waitSeconds} seconds before playing video (start delay compensation {compensationMs} ms)");
         _playbackDelayStopwatch ??= new Stopwatch();
         _playbackDelayStopwatch.Start();
         _videoPlayer.Pause();
         _videoPlayer.Hide();
         _videoPlayer.PlayerTime = 0;
-        var ticksUntilStart = delayStartTime * TimeSpan.TicksPerSecond;
-        yield return new WaitUntil(() => _playbackDelayStopwatch.ElapsedTicks >= ticksUntilStart);
+        yield return new WaitUntil(() => _playbackDelayStopwatch.Elapsed.TotalSeconds >= waitSeconds);
         _loggingService.Debug("Elapsed ms: " + _playbackDelayStopwatch.ElapsedMilliseconds);
         _playbackDelayStopwatch.Stop();
         _playbackDelayStopwatch.Reset();
@@ -676,6 +726,7 @@ public class PlaybackManager : MonoBehaviour
         if (_activeAudioSource != null && _activeAudioSource.time > 0)
             _lastKnownAudioSourceTime = _activeAudioSource.time;
 
+        if (armStartSync) ArmStartSync(delayedStart: true);
         _videoPlayer.Play();
     }
 
@@ -759,11 +810,13 @@ public class PlaybackManager : MonoBehaviour
             yield break;
         }
 
+        _firstNoteSongTime = preview ? null : FindFirstNoteSongTime(startTime);
         PlayVideo(startTime);
     }
 
     public void PauseVideo()
     {
+        CancelStartSync();
         StopAllCoroutines();
         if (_videoPlayer.IsPlaying && _videoConfig != null) _videoPlayer.Pause();
     }
@@ -773,11 +826,11 @@ public class PlaybackManager : MonoBehaviour
         if (!_config.TheaterActive || _videoPlayer.IsPlaying || _videoConfig == null || !_videoConfig.IsPlayable ||
             (_videoPlayer.VideoEnded && _videoConfig.loop != true)) return;
 
-        var referenceTime = GetReferenceTime();
-        if (referenceTime > 0)
+        var targetTime = GetTargetTime();
+        if (targetTime > 0)
             _videoPlayer.Play();
         else if (_playbackDelayStopwatch is { IsRunning: false })
-            StartCoroutine(PlayVideoDelayedCoroutine(VideoToRealSeconds(-referenceTime)));
+            StartCoroutine(PlayVideoDelayedCoroutine(VideoToRealSeconds(-targetTime), armStartSync: false));
     }
 
     public void ResyncVideo(float? referenceTime = null)
@@ -788,10 +841,12 @@ public class PlaybackManager : MonoBehaviour
         if (referenceTime != null)
             newTime = referenceTime.Value;
         else
-            newTime = GetReferenceTime();
+            newTime = GetTargetTime();
 
-        if (newTime < 0)
+        var delayedStart = newTime < 0;
+        if (delayedStart)
         {
+            CancelStartSync();
             _videoPlayer.Hide();
             StopAllCoroutines();
             StartCoroutine(PlayVideoDelayedCoroutine(VideoToRealSeconds(-newTime)));
@@ -803,12 +858,14 @@ public class PlaybackManager : MonoBehaviour
 
         if (Math.Abs(_videoPlayer.PlayerTime - newTime) < 0.2f) return;
 
+        if (!delayedStart) CancelStartSync();
         _videoPlayer.PlayerTime = newTime;
     }
 
     // Called when the user moves the speed slider: re-time the running video to the new speed
     public void ApplyPlaybackSpeed()
     {
+        CancelStartSync();
         if (_videoConfig == null || !_videoPlayer.IsPlaying) return;
         if (!_speedPendingFirstFrame) _videoPlayer.PlaybackSpeed = TargetVideoSpeed;
         ResyncVideo();
@@ -829,6 +886,172 @@ public class PlaybackManager : MonoBehaviour
             _videoConfig.ErrorMessage += " See logs for details.";
 
         // _videoMenu.SetupLevelDetailView(VideoConfig);
+    }
+
+    #endregion
+
+    #region Start Sync
+
+    private void ArmStartSync(bool delayedStart)
+    {
+        _startSyncPhase = StartSyncPhase.WaitingForFirstFrame;
+        _startSyncDelayedStart = delayedStart;
+        Array.Clear(_startSyncSamples, 0, _startSyncSamples.Length);
+        _startSyncSampleCount = 0;
+        _startSyncLearned = false;
+    }
+
+    private void CancelStartSync()
+    {
+        if (_startSyncPhase == StartSyncPhase.Nudging) RestoreStartSyncSpeed();
+        _startSyncPhase = StartSyncPhase.Off;
+    }
+
+    private void RestoreStartSyncSpeed()
+    {
+        // A slow start applies its own speed in ApplySpeedOnFirstFrame.
+        if (!_speedPendingFirstFrame) _videoPlayer.PlaybackSpeed = TargetVideoSpeed;
+    }
+
+    private void StartSyncStep(float audioSourceTime)
+    {
+        if (_startSyncPhase is StartSyncPhase.Off or StartSyncPhase.Done) return;
+        if (_videoPlayer.IsSyncing || !_videoPlayer.IsPlaying || _activeAudioSource?.isPlaying != true ||
+            _speedPendingFirstFrame) return;
+
+        var aheadMs = (_videoPlayer.PlayerTime - GetTargetTime()) * 1000;
+        var now = Time.realtimeSinceStartup;
+        if (_startSyncPhase == StartSyncPhase.WaitingForFirstFrame)
+        {
+            _startSyncFirstFrameTime = now;
+            _startSyncPhase = StartSyncPhase.Measuring;
+        }
+
+        if (_startSyncPhase == StartSyncPhase.Nudging)
+        {
+            if (now >= _startSyncNudgeEndTime || now >= GetStartSyncWindowEnd(now, audioSourceTime))
+            {
+                RestoreStartSyncSpeed();
+                // The next six frames measure the result at the normal playback speed.
+                _startSyncPhase = StartSyncPhase.Measuring;
+            }
+            return;
+        }
+
+        // Both clocks advance in steps. Use the median of six frames, so a stale first frame or two (seen after
+        // some starts) can't skew the learned delay or the nudge.
+        _startSyncSamples[_startSyncSampleCount++] = aheadMs;
+        if (_startSyncSampleCount < _startSyncSamples.Length) return;
+
+        var sorted = (double[])_startSyncSamples.Clone();
+        Array.Sort(sorted);
+        var meanMs = (sorted[2] + sorted[3]) / 2;
+        Array.Clear(_startSyncSamples, 0, _startSyncSamples.Length);
+        _startSyncSampleCount = 0;
+
+        var mode = SyncCheckMode;
+        var absoluteErrorMs = Math.Abs(meanMs);
+        if (absoluteErrorMs > 250)
+        {
+            _loggingService.Info(FormattableString.Invariant(
+                $"Start sync: {mode} first frame {meanMs:+0;-0;0} ms from target, too far to nudge"));
+            _startSyncPhase = StartSyncPhase.Done;
+            return;
+        }
+
+        if (!_startSyncLearned)
+        {
+            _startSyncFirstErrorMs = meanMs;
+            var lead = IsPreviewPlaying ? 0 : _config.VideoLeadMs;
+            if (_startSyncDelayedStart && !IsPreviewPlaying)
+            {
+                var oldComp = _config.StartDelayCompensationMs;
+                var newComp = Math.Max(0, Math.Min(200, (int)Math.Round(oldComp - 0.5 * meanMs)));
+                if (newComp != oldComp) _config.StartDelayCompensationMs = newComp;
+                _loggingService.Info(FormattableString.Invariant(
+                    $"Start sync: {mode} first frame {_startSyncFirstErrorMs:+0;-0;0} ms from target (lead {lead} ms); start delay compensation {oldComp} -> {newComp} ms"));
+            }
+            else
+            {
+                _loggingService.Info(FormattableString.Invariant(
+                    $"Start sync: {mode} first frame {_startSyncFirstErrorMs:+0;-0;0} ms from target (lead {lead} ms)"));
+            }
+
+            _startSyncLearned = true;
+        }
+
+        if (absoluteErrorMs <= 10)
+        {
+            _startSyncPhase = StartSyncPhase.Done;
+            _loggingService.Info(FormattableString.Invariant($"Start sync: {mode} on target ({meanMs} ms)"));
+            return;
+        }
+
+        // Preview audio is audible, so its playback speed changes by a smaller amount.
+        var rate = IsPreviewPlaying ? 0.05f : 0.15f;
+        var duration = absoluteErrorMs / 1000 / (TargetVideoSpeed * rate);
+        var windowEnd = GetStartSyncWindowEnd(now, audioSourceTime);
+        duration = Math.Min(duration, windowEnd - now);
+        if (duration < 0.05)
+        {
+            _startSyncPhase = StartSyncPhase.Done;
+            _loggingService.Info(FormattableString.Invariant(
+                $"Start sync: {mode} {meanMs} ms from target, no time left before the first note"));
+            return;
+        }
+
+        _videoPlayer.PlaybackSpeed = TargetVideoSpeed * (meanMs < 0 ? 1 + rate : 1 - rate);
+        _startSyncNudgeEndTime = (float)(now + duration);
+        _startSyncPhase = StartSyncPhase.Nudging;
+    }
+
+    private float GetStartSyncWindowEnd(float now, float audioSourceTime)
+    {
+        if (IsPreviewPlaying || _activeScene == Scene.Menu) return _startSyncFirstFrameTime + 2f;
+        if (_firstNoteSongTime is not { } firstNoteTime) return _startSyncFirstFrameTime + 1.5f;
+
+        // Song time advances at the selected gameplay or practice speed.
+        var noteDeadline = now + (firstNoteTime - 0.15f - audioSourceTime) / _songSpeed;
+        return Math.Min(_startSyncFirstFrameTime + 3f, noteDeadline);
+    }
+
+    private float? FindFirstNoteSongTime(float audioSourceTime)
+    {
+        IReadonlyBeatmapData? beatmapData = null;
+        try
+        {
+            beatmapData = Plugin.gameCoreContainer.TryResolve<IReadonlyBeatmapData>();
+        }
+        catch
+        {
+            // Try the scene setup data if the gameplay container can't resolve the beatmap.
+        }
+
+        float? firstNoteSongTime = null;
+        try
+        {
+            beatmapData ??= BS_Utils.Plugin.LevelData.GameplayCoreSceneSetupData.transformedBeatmapData;
+            if (beatmapData != null)
+            {
+                foreach (var note in beatmapData.GetBeatmapDataItems<NoteData>(0))
+                {
+                    if (note.colorType != ColorType.None && note.time >= audioSourceTime &&
+                        (firstNoteSongTime == null || note.time < firstNoteSongTime.Value))
+                        firstNoteSongTime = note.time;
+                }
+            }
+        }
+        catch
+        {
+            firstNoteSongTime = null;
+        }
+
+        if (firstNoteSongTime is { } time)
+            _loggingService.Info(FormattableString.Invariant($"Start sync: first note at {time:0.00} s"));
+        else
+            _loggingService.Info("Start sync: first note time unavailable, using a 1.5 s window");
+
+        return firstNoteSongTime;
     }
 
     #endregion
@@ -892,6 +1115,7 @@ public class PlaybackManager : MonoBehaviour
 
     public void ApplyOffset(int offset)
     {
+        CancelStartSync();
         if (!_videoPlayer.IsPlaying || _activeAudioSource == null) return;
 
         // Pause the preview audio source and start seeking. Audio Source will be re-enabled after video player draws its next frame
@@ -905,6 +1129,7 @@ public class PlaybackManager : MonoBehaviour
 
     public void ApplyOffsetToVideo(float offset)
     {
+        CancelStartSync();
         if (_activeAudioSource == null || _videoConfig == null || !_videoConfig.IsPlayable) return;
 
         var newTime = _videoPlayer.PlayerTime + offset / 1000f;
@@ -1041,6 +1266,7 @@ public class PlaybackManager : MonoBehaviour
 
     public void StopPreview(bool stopPreviewMusic)
     {
+        CancelStartSync();
         if (!IsPreviewPlaying) return;
         _loggingService.Debug($"Stopping preview (stop audio source: {stopPreviewMusic}");
         _previewGeneration++;

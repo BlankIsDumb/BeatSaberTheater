@@ -64,6 +64,13 @@ internal class TheaterSettingsViewController
         set => _displaySettings.CornerRoundness = value;
     }
 
+    [UIValue("video-lead")]
+    public int VideoLeadMs
+    {
+        get => _config.VideoLeadMs;
+        set => _config.VideoLeadMs = Math.Max(0, Math.Min(150, value));
+    }
+
     [UIValue("curved-screen")]
     public bool CurvedScreen
     {
