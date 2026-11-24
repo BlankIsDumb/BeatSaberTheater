@@ -20,6 +20,10 @@ internal class TheaterSettingsViewController
 
     [UIValue("modes")][UsedImplicitly] private List<object> _qualityModes = VideoQuality.GetModeList();
     [UIValue("formats")][UsedImplicitly] private List<object> _videoFormats = VideoFormats.GetFormatList();
+    private const string SyncCorrectionBeforeFirstNoteText = "Before first note";
+    private const string SyncCorrectionAnyTimeText = "Any time";
+    [UIValue("sync-correction-modes")][UsedImplicitly]
+    private List<object> _syncCorrectionModes = new() { SyncCorrectionBeforeFirstNoteText, SyncCorrectionAnyTimeText };
 
     // The on/off switch, bloom and corner roundness are shared with the Display view in the Theater tab
     [UIValue("show-video")]
@@ -76,6 +80,13 @@ internal class TheaterSettingsViewController
     {
         get => _config.VideoLeadMs;
         set => _config.VideoLeadMs = Math.Max(0, Math.Min(150, value));
+    }
+
+    [UIValue("sync-correction")]
+    public string SyncCorrection
+    {
+        get => _config.SyncCorrectionAnyTime ? SyncCorrectionAnyTimeText : SyncCorrectionBeforeFirstNoteText;
+        set => _config.SyncCorrectionAnyTime = value == SyncCorrectionAnyTimeText;
     }
 
     [UIValue("curved-screen")]

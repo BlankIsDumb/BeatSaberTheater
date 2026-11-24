@@ -47,8 +47,11 @@
                             hover-hint="Adjust the roundness of the screen's corners to your preference.&#xD;&#xA;&#xD;&#xA;Default: 0"
                             min="0" max="100" increment="1" get-event="refresh-values"></slider-setting>
             <slider-setting apply-on-change="true" integer-only="true" value="video-lead" text="Video Lead (ms)"
-                            hover-hint="How far ahead of the music the video picture is shown, to make up for the delay before the picture appears in your headset. Lower it if the video looks early, raise it if it looks late.&#xD;&#xA;&#xD;&#xA;Most setups don't need to change this.&#xD;&#xA;&#xD;&#xA;Default: 67"
+                            hover-hint="Beat Saber draws each frame a little ahead of the music, to make up for the time a frame takes to reach your headset. Theater shows the video ahead by the same amount, so it lines up with the notes: about 67 ms by default.&#xD;&#xA;&#xD;&#xA;If your headset's delay is shorter or longer, lower this when the video looks early and raise it when it looks late. Most players never need to touch this.&#xD;&#xA;&#xD;&#xA;Default: 67"
                             min="0" max="150" increment="1" get-event="refresh-values"></slider-setting>
+            <dropdown-list-setting apply-on-change="true" text='Sync Correction' value='sync-correction'
+                                   options='sync-correction-modes'
+                                   hover-hint="After the video starts, skips ahead or resumes from a pause, Theater briefly speeds it up or slows it down (by 15 %, for at most 3 seconds) to line it up with the song. The video is muted during songs, so you can't hear this.&#xD;&#xA;&#xD;&#xA;Before first note: stops before the map's first note, so nothing changes while you're hitting notes.&#xD;&#xA;Any time: also corrects after the first note, for example after a pause or when the video starts late.&#xD;&#xA;&#xD;&#xA;Bigger errors, over 300 ms, are fixed by jumping the video back into place instead.&#xD;&#xA;&#xD;&#xA;Default: Any time"></dropdown-list-setting>
         </modifier-container>
     </tab>
 </vertical>

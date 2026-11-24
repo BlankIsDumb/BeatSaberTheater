@@ -41,6 +41,11 @@ public class PluginConfig
     // Hold the start of a solo song (at most 3 s) until its video has loaded, so it starts in sync from its first frame.
     public virtual bool WaitForVideoBeforeSong { get; set; } = false;
 
+    // Sync Correction setting. False: start sync stops 0.15 s before a song's first note (the user's original rule).
+    // True: in songs, every start, seek and resume gets the full 3 s correction window, even after notes have started.
+    // The video is muted in songs, so the speed nudge can't be heard there.
+    public virtual bool SyncCorrectionAnyTime { get; set; } = true;
+
     // Display settings, in percent. See Settings/DisplaySettings.cs for ranges.
     public virtual int ScreenBrightness { get; set; } = 100;
     public virtual int ScreenScale { get; set; } = 100;

@@ -1297,6 +1297,8 @@ public class PlaybackManager : MonoBehaviour
 
     private void VideoPlayerErrorReceived(string message)
     {
+        // An offset seek may hold the preview audio paused until the next video frame, which won't come now
+        if (_videoPlayer.IsSyncing) EndResyncAudioPause();
         StopPlayback();
         if (_videoConfig == null) return;
 
@@ -1331,14 +1333,22 @@ public class PlaybackManager : MonoBehaviour
         _startSyncPhase = StartSyncPhase.Off;
     }
 
-    // Start sync may run again after a seek or a resume only in a song, and only while this play hasn't reached its
-    // first note (the user's rule: the video never changes once notes are being hit). An unknown first note means no.
+    // Start sync may run again after a seek or a resume, in songs only. With Sync Correction "Before first note" (the
+    // user's original rule) only while this play hasn't reached its first note; an unknown first note means no. With
+    // "Any time", always.
     private bool CanRearmStartSync(string reason)
     {
         if (_activeScene != Scene.SoloGameplay || IsPreviewPlaying || _activeAudioSource == null) return false;
-        if (_firstNoteReached || _firstNoteSongTime is not { } firstNoteTime) return false;
-
         var songTime = _activeAudioSource.time;
+
+        if (_config.SyncCorrectionAnyTime)
+        {
+            _loggingService.Info(FormattableString.Invariant(
+                $"Start sync: re-checking after a {reason} at song {songTime:0.00} s (correction any time)"));
+            return true;
+        }
+
+        if (_firstNoteReached || _firstNoteSongTime is not { } firstNoteTime) return false;
         if (songTime >= firstNoteTime - FirstNoteMarginSeconds) return false;
 
         _loggingService.Info(FormattableString.Invariant(
@@ -1358,7 +1368,11 @@ public class PlaybackManager : MonoBehaviour
         if (_videoPlayer.IsSyncing || !_videoPlayer.IsPlaying || _activeAudioSource?.isPlaying != true ||
             _speedPendingFirstFrame) return;
 
-        var aheadMs = (_videoPlayer.PlayerTime - GetTargetTime()) * 1000;
+        // Wrap like FrameReadyCore, so a looping video past its length isn't measured against the unwrapped target
+        var startSyncTarget = GetTargetTime();
+        var startSyncDuration = _videoPlayer.VideoDuration;
+        if (startSyncDuration > 0) startSyncTarget %= startSyncDuration;
+        var aheadMs = (_videoPlayer.PlayerTime - startSyncTarget) * 1000;
         var now = Time.realtimeSinceStartup;
         if (_startSyncPhase == StartSyncPhase.WaitingForFirstFrame)
         {
@@ -1441,7 +1455,7 @@ public class PlaybackManager : MonoBehaviour
         {
             _startSyncPhase = StartSyncPhase.Done;
             _loggingService.Info(FormattableString.Invariant(
-                $"Start sync: {mode} {meanMs} ms from target, no time left before the first note"));
+                $"Start sync: {mode} {meanMs} ms from target, no time left in the correction window"));
             return;
         }
 
@@ -1453,6 +1467,8 @@ public class PlaybackManager : MonoBehaviour
     private float GetStartSyncWindowEnd(float now, float audioSourceTime)
     {
         if (IsPreviewPlaying || _activeScene == Scene.Menu) return _startSyncFirstFrameTime + 2f;
+        // Sync Correction "Any time": the full 3 s after the first frame in songs, whether or not notes have started
+        if (_config.SyncCorrectionAnyTime) return _startSyncFirstFrameTime + 3f;
         if (_firstNoteSongTime is not { } firstNoteTime) return _startSyncFirstFrameTime + 1.5f;
 
         // Song time advances at the selected gameplay or practice speed.
@@ -1491,8 +1507,12 @@ public class PlaybackManager : MonoBehaviour
             firstNoteSongTime = null;
         }
 
+        var correction = _config.SyncCorrectionAnyTime ? "any time" : "before first note";
         if (firstNoteSongTime is { } time)
-            _loggingService.Info(FormattableString.Invariant($"Start sync: first note at {time:0.00} s"));
+            _loggingService.Info(FormattableString.Invariant(
+                $"Start sync: first note at {time:0.00} s (correction {correction})"));
+        else if (_config.SyncCorrectionAnyTime)
+            _loggingService.Info("Start sync: first note time unavailable (correction any time)");
         else
             _loggingService.Info("Start sync: first note time unavailable, using a 1.5 s window");
 
@@ -1563,11 +1583,16 @@ public class PlaybackManager : MonoBehaviour
         CancelStartSync();
         if (!_videoPlayer.IsPlaying || _activeAudioSource == null) return;
 
-        if (_videoPlayer.PlayerTime + offset / 1000f < 0)
+        // The callers have already changed _videoConfig.offset, so GetTargetTime() is where the video belongs now. Moving it
+        // there, not by `offset` from PlayerTime, keeps quick clicks: during a seek PlayerTime still reports the old
+        // position, so every click used to start from it and the earlier clicks were lost.
+        if (GetTargetTime() < 0)
         {
             // The video now starts later than the song's current point. There's no seek to wait for: keep the audio running
-            // and let the delayed play start the video on the song clock.
-            ApplyOffsetToVideo(offset);
+            // and let the delayed play start the video on the song clock. An earlier click's seek may still hold the audio
+            // paused, and the paused video would never deliver the frame that resumes it, so resume it here.
+            if (_videoPlayer.IsSyncing) EndResyncAudioPause();
+            ApplyOffsetToVideo();
             _loggingService.Info("Applying offset: " + offset);
             return;
         }
@@ -1576,17 +1601,21 @@ public class PlaybackManager : MonoBehaviour
         _videoPlayer.IsSyncing = true;
         _activeAudioSource.Pause();
 
-        ApplyOffsetToVideo(offset);
+        ApplyOffsetToVideo();
+        // A quick second click must not hook the handler twice
+        _videoPlayer.RemoveFrameReadyEventHandler(PlayerStartedAfterResync);
         _videoPlayer.AddFrameReadyEventHandler(PlayerStartedAfterResync);
         _loggingService.Info("Applying offset: " + offset);
     }
 
-    public void ApplyOffsetToVideo(float offset)
+    // Moves the video to where the current offset puts it (GetTargetTime() includes _videoConfig.offset), or hands it to
+    // the delayed play when that point is before the video's start. Repeated calls land on the same spot.
+    public void ApplyOffsetToVideo()
     {
         CancelStartSync();
         if (_activeAudioSource == null || _videoConfig == null || !_videoConfig.IsPlayable) return;
 
-        var newTime = _videoPlayer.PlayerTime + offset / 1000f;
+        var newTime = GetTargetTime();
 
         if (newTime < 0)
         {
@@ -1595,7 +1624,7 @@ public class PlaybackManager : MonoBehaviour
             StartDelayedPlay(armStartSync: true, learnable: false);
             return;
         }
-        else if (newTime > _videoPlayer.VideoDuration && _videoPlayer.VideoDuration > 0)
+        else if (newTime >= _videoPlayer.VideoDuration && _videoPlayer.VideoDuration > 0)
         {
             newTime %= _videoPlayer.VideoDuration;
         }
@@ -1604,6 +1633,12 @@ public class PlaybackManager : MonoBehaviour
     }
 
     private void PlayerStartedAfterResync(VideoPlayer player, long frame)
+    {
+        EndResyncAudioPause();
+    }
+
+    // Ends the audio pause an offset seek started: unhooks the frame handler and plays the preview audio again
+    private void EndResyncAudioPause()
     {
         _videoPlayer.RemoveFrameReadyEventHandler(PlayerStartedAfterResync);
         if (_activeAudioSource == null)
