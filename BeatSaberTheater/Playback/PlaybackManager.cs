@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -7,6 +8,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using BeatSaberTheater.Download;
 using BeatSaberTheater.Environment.Interfaces;
+using BeatSaberTheater.Harmony.Patches;
 using BeatSaberTheater.Screen;
 using BeatSaberTheater.Screen.Interfaces;
 using BeatSaberTheater.Settings;
@@ -15,6 +17,7 @@ using BeatSaberTheater.Video;
 using BeatSaberTheater.Video.Config;
 using BS_Utils.Gameplay;
 using BS_Utils.Utilities;
+using Unity.Profiling;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.Video;
@@ -35,7 +38,10 @@ public class PlaybackManager : MonoBehaviour
     private float _lastKnownAudioSourceTime;
     private Environment.LightManager _lightManager = null!;
     private float _offsetAfterPrepare;
-    private Stopwatch? _playbackDelayStopwatch;
+    private Coroutine? _delayedPlayRoutine;
+    private bool _lateStartPending;   // Play() was called before the video finished loading; place it in OnPrepareComplete
+    private DiContainer? _gameSceneContainer;
+    private bool _gameSceneVideoPending;
     private IEnumerator? _prepareVideoCoroutine;
     private int _previewGeneration;
     private float _previewStartTime;
@@ -58,7 +64,7 @@ public class PlaybackManager : MonoBehaviour
     }
 
     private StartSyncPhase _startSyncPhase;
-    private bool _startSyncDelayedStart;
+    private bool _startSyncLearnable;
     private float _startSyncFirstFrameTime;
     private float _startSyncNudgeEndTime;
     private readonly double[] _startSyncSamples = new double[6];
@@ -67,15 +73,93 @@ public class PlaybackManager : MonoBehaviour
     private bool _startSyncLearned;
     private float? _firstNoteSongTime;
 
+    // Temporary sync check logger: remove together with the performance logger
     private int _syncCheckCount;
     private double _syncCheckMax;
     private double _syncCheckMin;
     private float _syncCheckPlayStart;
     private double _syncCheckSum;
     private float _syncCheckWindowStart;
+    private const float SongStartWaitLimitSeconds = 3f;
     private AudioTimeSyncController? _timeSyncController;
     private VideoConfig? _videoConfig;
     private CustomVideoPlayer _videoPlayer = null!;
+
+    // ---- Temporary performance logger: remove together with the sync check logger ----
+    private sealed class PerfStat
+    {
+        private double _sum;
+        private double _max;
+        private int _count;
+
+        public void Add(double value)
+        {
+            _sum += value;
+            if (_count == 0 || value > _max) _max = value;
+            _count++;
+        }
+
+        public void Reset()
+        {
+            _sum = 0;
+            _max = 0;
+            _count = 0;
+        }
+
+        // "avg/max" after multiplying by scale, or "n/a" if nothing was recorded
+        public string Format(double scale, string format) =>
+            _count == 0
+                ? "n/a"
+                : (_sum / _count * scale).ToString(format, CultureInfo.InvariantCulture) + "/" +
+                  (_max * scale).ToString(format, CultureInfo.InvariantCulture);
+    }
+
+    private const float PerfWindowSeconds = 5f;
+    private bool _perfActive;
+    private float _perfWindowStart;
+    private int _perfWindowGcStart;
+    // 5 s at up to ~400 fps, so the list never grows (and allocates) mid-window
+    private readonly List<float> _frameTimesMs = new(2048);
+    private float _worstFrameMs;
+    private float _worstFrameSongTime;
+
+    private ProfilerRecorder _recMainThread;
+    private ProfilerRecorder _recRenderThread;
+    private ProfilerRecorder _recDrawCalls;
+    private ProfilerRecorder _recBatches;
+    private ProfilerRecorder _recSetPass;
+    private ProfilerRecorder _recTriangles;
+    private ProfilerRecorder _recGcAlloc;
+    private bool _frameTimingEnabled;
+    private readonly FrameTiming[] _frameTimings = new FrameTiming[1];
+    private readonly List<UnityEngine.XR.XRDisplaySubsystem> _xrDisplays = new();
+    private UnityEngine.XR.XRDisplaySubsystem? _xrDisplay;
+    private int _xrDroppedStart = -1;
+    private int _xrDroppedEnd = -1;
+    private int _xrPresentedStart = -1;
+    private int _xrPresentedEnd = -1;
+    private float _xrRefreshRate = -1f;
+
+    private readonly PerfStat _statMainThread = new();        // ns
+    private readonly PerfStat _statRenderThread = new();      // ns
+    private readonly PerfStat _statDrawCalls = new();
+    private readonly PerfStat _statBatches = new();
+    private readonly PerfStat _statSetPass = new();
+    private readonly PerfStat _statTriangles = new();
+    private readonly PerfStat _statGcAlloc = new();           // bytes
+    private readonly PerfStat _statCpuMain = new();           // ms
+    private readonly PerfStat _statCpuRender = new();         // ms
+    private readonly PerfStat _statGpu = new();               // ms
+    private readonly PerfStat _statXrAppGpu = new();          // raw value as reported, unit not assumed
+    private readonly PerfStat _statXrCompositorGpu = new();   // raw value as reported, unit not assumed
+    private readonly PerfStat _statTheaterFrameReady = new(); // ms
+
+    private int _videoFramesShown;
+    private int _videoFramesSkipped;
+    private float _videoLongestGapMs;
+    private long _lastVideoFrameIndex = -1;
+    private float _lastVideoFrameTime;
+    private readonly Stopwatch _frameReadyStopwatch = new();
 
     [Inject] private readonly PluginConfig _config = null!;
     [Inject] private readonly DisplaySettings _displaySettings = null!;
@@ -100,10 +184,13 @@ public class PlaybackManager : MonoBehaviour
         Events.DifficultySelected += DifficultySelected;
         _displaySettings.Changed += OnDisplaySettingsChanged;
         _displaySettings.TheaterEnabledChanged += OnTheaterEnabledChanged;
+        SongStartWaitPatch.ReadyToStart = IsReadyForSongStart;
     }
 
     private void OnDestroy()
     {
+        StopPerfLogger(); // Temporary performance logger: remove together with the sync check logger
+
         if (_videoPlayer != null)
             _videoPlayer.Shutdown(FrameReady, OnPrepareComplete, VideoPlayerErrorReceived);
 
@@ -117,6 +204,198 @@ public class PlaybackManager : MonoBehaviour
         Events.DifficultySelected -= DifficultySelected;
         _displaySettings.Changed -= OnDisplaySettingsChanged;
         _displaySettings.TheaterEnabledChanged -= OnTheaterEnabledChanged;
+        if (SongStartWaitPatch.ReadyToStart == IsReadyForSongStart) SongStartWaitPatch.ReadyToStart = null;
+    }
+
+    // Temporary performance logger: remove together with the sync check logger
+    private void Update()
+    {
+        if (_activeScene != Scene.SoloGameplay)
+        {
+            StopPerfLogger();
+            return;
+        }
+
+        if (!_perfActive) StartPerfLogger();
+
+        var now = Time.realtimeSinceStartup;
+        var frameMs = Time.unscaledDeltaTime * 1000f;
+        _frameTimesMs.Add(frameMs);
+        if (frameMs > _worstFrameMs)
+        {
+            _worstFrameMs = frameMs;
+            _worstFrameSongTime = _activeAudioSource != null ? _activeAudioSource.time : -1f;
+        }
+
+        if (_recMainThread.Valid) _statMainThread.Add(_recMainThread.LastValue);
+        if (_recRenderThread.Valid) _statRenderThread.Add(_recRenderThread.LastValue);
+        if (_recDrawCalls.Valid) _statDrawCalls.Add(_recDrawCalls.LastValue);
+        if (_recBatches.Valid) _statBatches.Add(_recBatches.LastValue);
+        if (_recSetPass.Valid) _statSetPass.Add(_recSetPass.LastValue);
+        if (_recTriangles.Valid) _statTriangles.Add(_recTriangles.LastValue);
+        if (_recGcAlloc.Valid) _statGcAlloc.Add(_recGcAlloc.LastValue);
+
+        if (_frameTimingEnabled)
+        {
+            FrameTimingManager.CaptureFrameTimings();
+            if (FrameTimingManager.GetLatestTimings(1, _frameTimings) > 0)
+            {
+                _statCpuMain.Add(_frameTimings[0].cpuMainThreadFrameTime);
+                _statCpuRender.Add(_frameTimings[0].cpuRenderThreadFrameTime);
+                _statGpu.Add(_frameTimings[0].gpuFrameTime);
+            }
+        }
+
+        if (_xrDisplay != null && _xrDisplay.running)
+        {
+            if (_xrDisplay.TryGetAppGPUTimeLastFrame(out var appGpu)) _statXrAppGpu.Add(appGpu);
+            if (_xrDisplay.TryGetCompositorGPUTimeLastFrame(out var compositorGpu)) _statXrCompositorGpu.Add(compositorGpu);
+            if (_xrDisplay.TryGetDroppedFrameCount(out var dropped))
+            {
+                if (_xrDroppedStart < 0) _xrDroppedStart = dropped;
+                _xrDroppedEnd = dropped;
+            }
+            if (_xrDisplay.TryGetFramePresentCount(out var presented))
+            {
+                if (_xrPresentedStart < 0) _xrPresentedStart = presented;
+                _xrPresentedEnd = presented;
+            }
+            if (_xrDisplay.TryGetDisplayRefreshRate(out var refreshRate)) _xrRefreshRate = refreshRate;
+        }
+
+        if (now - _perfWindowStart < PerfWindowSeconds) return;
+        LogPerfWindow(now);
+        ResetPerfWindow(now);
+    }
+
+    // Temporary performance logger: remove together with the sync check logger
+    private void StartPerfLogger()
+    {
+        _perfActive = true;
+        ResetVideoCadence();
+        _recMainThread = ProfilerRecorder.StartNew(ProfilerCategory.Internal, "Main Thread", 1, ProfilerRecorderOptions.Default);
+        _recRenderThread = ProfilerRecorder.StartNew(ProfilerCategory.Internal, "Render Thread", 1, ProfilerRecorderOptions.Default);
+        _recDrawCalls = ProfilerRecorder.StartNew(ProfilerCategory.Render, "Draw Calls Count", 1, ProfilerRecorderOptions.Default);
+        _recBatches = ProfilerRecorder.StartNew(ProfilerCategory.Render, "Batches Count", 1, ProfilerRecorderOptions.Default);
+        _recSetPass = ProfilerRecorder.StartNew(ProfilerCategory.Render, "SetPass Calls Count", 1, ProfilerRecorderOptions.Default);
+        _recTriangles = ProfilerRecorder.StartNew(ProfilerCategory.Render, "Triangles Count", 1, ProfilerRecorderOptions.Default);
+        _recGcAlloc = ProfilerRecorder.StartNew(ProfilerCategory.Memory, "GC Allocated In Frame", 1, ProfilerRecorderOptions.Default);
+        _frameTimingEnabled = FrameTimingManager.IsFeatureEnabled();
+
+        _xrDisplay = null;
+        SubsystemManager.GetSubsystems(_xrDisplays);
+        foreach (var display in _xrDisplays)
+        {
+            if (!display.running) continue;
+            _xrDisplay = display;
+            break;
+        }
+
+        _loggingService.Info(string.Format(CultureInfo.InvariantCulture,
+            "Perf logger: main thread {0}, render thread {1}, draw calls {2}, batches {3}, setpass {4}, triangles {5}, " +
+            "GC alloc {6}, frame timing {7}, XR display {8}",
+            _recMainThread.Valid, _recRenderThread.Valid, _recDrawCalls.Valid, _recBatches.Valid, _recSetPass.Valid,
+            _recTriangles.Valid, _recGcAlloc.Valid, _frameTimingEnabled, _xrDisplay != null));
+        _loggingService.Info(string.Format(CultureInfo.InvariantCulture,
+            "Perf context: environment {0}, Theater {1}, video {2}, screen scale {3}%, brightness {4}%, edge softness {5}, " +
+            "bloom {6}, curved {7}, transparent {8}",
+            TheaterFileHelpers.GetEnvironmentName(), _config.TheaterActive ? "on" : "off",
+            _videoConfig?.IsPlayable == true ? "configured" : "none", _config.ScreenScale, _config.ScreenBrightness,
+            _config.EdgeSoftness, _config.BloomIntensity, _config.CurvedScreen, _config.TransparencyEnabled));
+
+        ResetPerfWindow(Time.realtimeSinceStartup);
+    }
+
+    // Temporary performance logger: remove together with the sync check logger
+    private void StopPerfLogger()
+    {
+        if (!_perfActive) return;
+        _perfActive = false;
+        ResetVideoCadence();
+        _recMainThread.Dispose();
+        _recRenderThread.Dispose();
+        _recDrawCalls.Dispose();
+        _recBatches.Dispose();
+        _recSetPass.Dispose();
+        _recTriangles.Dispose();
+        _recGcAlloc.Dispose();
+        _xrDisplay = null;
+        _frameTimesMs.Clear();
+    }
+
+    // Temporary performance logger: remove together with the sync check logger.
+    // Forgets the last video frame, so the next gap measurement doesn't span a pause, a restart or a new play.
+    private void ResetVideoCadence()
+    {
+        _lastVideoFrameIndex = -1;
+    }
+
+    // Temporary performance logger: remove together with the sync check logger
+    private void ResetPerfWindow(float now)
+    {
+        // Per window, so a window without a refresh rate reading prints n/a, not a stale value
+        _xrRefreshRate = -1f;
+        _perfWindowStart = now;
+        _perfWindowGcStart = GC.CollectionCount(0);
+        _frameTimesMs.Clear();
+        _worstFrameMs = 0f;
+        _worstFrameSongTime = -1f;
+        _statMainThread.Reset();
+        _statRenderThread.Reset();
+        _statDrawCalls.Reset();
+        _statBatches.Reset();
+        _statSetPass.Reset();
+        _statTriangles.Reset();
+        _statGcAlloc.Reset();
+        _statCpuMain.Reset();
+        _statCpuRender.Reset();
+        _statGpu.Reset();
+        _statXrAppGpu.Reset();
+        _statXrCompositorGpu.Reset();
+        _statTheaterFrameReady.Reset();
+        _xrDroppedStart = -1;
+        _xrDroppedEnd = -1;
+        _xrPresentedStart = -1;
+        _xrPresentedEnd = -1;
+        _videoFramesShown = 0;
+        _videoFramesSkipped = 0;
+        _videoLongestGapMs = 0f;
+    }
+
+    // Temporary performance logger: remove together with the sync check logger
+    private void LogPerfWindow(float now)
+    {
+        var count = _frameTimesMs.Count;
+        if (count == 0) return;
+        _frameTimesMs.Sort();
+        var median = _frameTimesMs[count / 2];
+        var p99 = _frameTimesMs[Math.Min(count - 1, (int)(count * 0.99f))];
+        var slow = 0;
+        foreach (var ms in _frameTimesMs)
+            if (ms > median * 1.5f) slow++;
+
+        var songTime = _activeAudioSource != null ? _activeAudioSource.time : -1f;
+        var videoState = _videoPlayer != null && _videoPlayer.IsPlaying ? "playing" : "not playing";
+        _loggingService.Info(string.Format(CultureInfo.InvariantCulture,
+            "Perf (Theater {0}, video {1}, song at {2:0.0} s): {3:0.0} fps, frame median {4:0.0} ms, p99 {5:0.0} ms, " +
+            "max {6:0.0} ms at song {7:0.0} s, {8} slow (>1.5x median), {9} GC, alloc {10} KB/frame",
+            _config.TheaterActive ? "on" : "off", videoState, songTime, count / (now - _perfWindowStart), median, p99,
+            _worstFrameMs, _worstFrameSongTime, slow, GC.CollectionCount(0) - _perfWindowGcStart,
+            _statGcAlloc.Format(1.0 / 1024, "0.0")));
+
+        var dropped = _xrDroppedStart >= 0 ? (_xrDroppedEnd - _xrDroppedStart).ToString(CultureInfo.InvariantCulture) : "n/a";
+        var presented = _xrPresentedStart >= 0 ? (_xrPresentedEnd - _xrPresentedStart).ToString(CultureInfo.InvariantCulture) : "n/a";
+        var refresh = _xrRefreshRate > 0 ? _xrRefreshRate.ToString("0", CultureInfo.InvariantCulture) : "n/a";
+        _loggingService.Info(string.Format(CultureInfo.InvariantCulture,
+            "Perf detail (avg/max): main thread {0} ms, render thread {1} ms, frame timing cpu main {2} / cpu render {3} / " +
+            "gpu {4} ms; XR app GPU {5}, compositor GPU {6} (raw), dropped {7}, presented {8}, refresh {9} Hz; " +
+            "draw calls {10}, batches {11}, setpass {12}, triangles {13}k; video frames {14}, skipped {15}, " +
+            "longest gap {16:0} ms; Theater video-frame code {17} us",
+            _statMainThread.Format(1e-6, "0.0"), _statRenderThread.Format(1e-6, "0.0"), _statCpuMain.Format(1, "0.0"),
+            _statCpuRender.Format(1, "0.0"), _statGpu.Format(1, "0.0"), _statXrAppGpu.Format(1, "0.####"),
+            _statXrCompositorGpu.Format(1, "0.####"), dropped, presented, refresh, _statDrawCalls.Format(1, "0"),
+            _statBatches.Format(1, "0"), _statSetPass.Format(1, "0"), _statTriangles.Format(0.001, "0"),
+            _videoFramesShown, _videoFramesSkipped, _videoLongestGapMs, _statTheaterFrameReady.Format(1000, "0")));
     }
 
     #endregion
@@ -147,6 +426,7 @@ public class PlaybackManager : MonoBehaviour
 
     public void StopPlayback()
     {
+        _lateStartPending = false;
         _videoPlayer.Stop();
         StopAllCoroutines();
         // A slow-speed start that never reached its first frame shouldn't switch the speed of whatever plays next
@@ -218,7 +498,36 @@ public class PlaybackManager : MonoBehaviour
         }
     }
 
+    // Temporary performance logger: remove together with the sync check logger
     public void FrameReady(VideoPlayer videoPlayer, long frame)
+    {
+        if (_perfActive)
+        {
+            var now = Time.realtimeSinceStartup;
+            _videoFramesShown++;
+            // Count frames the player skipped. Big or backward jumps are seeks, not skips.
+            if (_lastVideoFrameIndex >= 0 && frame > _lastVideoFrameIndex && frame - _lastVideoFrameIndex <= 30)
+            {
+                _videoFramesSkipped += (int)(frame - _lastVideoFrameIndex - 1);
+                _videoLongestGapMs = Math.Max(_videoLongestGapMs, (now - _lastVideoFrameTime) * 1000f);
+            }
+
+            _lastVideoFrameIndex = frame;
+            _lastVideoFrameTime = now;
+        }
+
+        _frameReadyStopwatch.Restart();
+        try
+        {
+            FrameReadyCore(videoPlayer, frame);
+        }
+        finally
+        {
+            if (_perfActive) _statTheaterFrameReady.Add(_frameReadyStopwatch.Elapsed.TotalMilliseconds);
+        }
+    }
+
+    private void FrameReadyCore(VideoPlayer videoPlayer, long frame)
     {
         if (_activeAudioSource == null || _videoConfig == null) return;
 
@@ -254,6 +563,7 @@ public class PlaybackManager : MonoBehaviour
                                   TheaterFileHelpers.FormatFloat(audioSourceTime) + " - Error (ms): " +
                                   Math.Round(error * 1000));
 
+        // Temporary sync check logger: remove together with the performance logger
         if (_videoPlayer.IsPlaying && !_videoPlayer.IsSyncing) RecordSyncCheck(playerTime - referenceTime, audioSourceTime);
 
         if (_videoConfig.endVideoAt.HasValue)
@@ -272,6 +582,7 @@ public class PlaybackManager : MonoBehaviour
 
         if (Math.Abs(audioSourceTime - _lastKnownAudioSourceTime) > 0.3f && _videoPlayer.IsPlaying)
         {
+            // Temporarily Info (was Debug) for the sync check; back to Debug when the temporary loggers are removed
             _loggingService.Info("Detected AudioSource seek, resyncing...");
             ResyncVideo();
         }
@@ -282,6 +593,7 @@ public class PlaybackManager : MonoBehaviour
             //Audio can intentionally go out of sync when the level fails for example. Don't resync the video in that case.
             if (_timeSyncController != null && !_timeSyncController.forcedNoAudioSync)
             {
+                // Temporarily Info (was Debug) for the sync check; back to Debug when the temporary loggers are removed
                 _loggingService.Info(
                     $"Detected desync (target {targetTime}, actual {playerTime}), resyncing...");
                 ResyncVideo();
@@ -290,6 +602,7 @@ public class PlaybackManager : MonoBehaviour
         if (audioSourceTime > 0) _lastKnownAudioSourceTime = audioSourceTime;
     }
 
+    // Temporary sync check logger: remove together with the performance logger.
     // Logs how far the video is from the song at Info level, so a release build's log shows real sync error.
     // Averaged per window, since both clocks only move in steps of a video frame or an audio buffer.
     private void RecordSyncCheck(double aheadSeconds, float songTime)
@@ -332,6 +645,10 @@ public class PlaybackManager : MonoBehaviour
     public void GameSceneLoaded()
     {
         CancelStartSync();
+        _gameSceneContainer = Plugin.gameCoreContainer;
+        _gameSceneVideoPending = false;
+        _lateStartPending = false;
+        _timeSyncController = null;
         StopAllCoroutines();
         _loggingService.Info("GameSceneLoaded");
 
@@ -407,6 +724,11 @@ public class PlaybackManager : MonoBehaviour
         SetAudioSourcePanning(0);
         _videoPlayer.Mute();
         _loggingService.Info("Playing video from GameSceneLoaded");
+        // StopPlayback() above unloaded the video. Start loading it now, at scene load, instead of when the song starts.
+        var gameVideoPath = _videoConfig.GetVideoPathForFormat(_config.Format);
+        if (!_videoPlayer.PlayerIsPrepared && gameVideoPath != null && _videoPlayer.Url == gameVideoPath)
+            _videoPlayer.Prepare();
+        _gameSceneVideoPending = true;
         StartCoroutine(PlayVideoAfterAudioSourceCoroutine(false));
         SceneChanged();
     }
@@ -461,8 +783,37 @@ public class PlaybackManager : MonoBehaviour
         // if (_activeScene == Scene.SoloGameplay) EnvironmentController.VideoConfigSceneModifications(_videoConfig);
     }
 
+    private bool IsReadyForSongStart(DiContainer? container, float heldSeconds)
+    {
+        if (!_config.WaitForVideoBeforeSong) return true;
+        var timedOut = heldSeconds >= SongStartWaitLimitSeconds;
+
+        // GameSceneLoaded for this level hasn't run yet: wait for it (it normally comes within a frame or two)
+        if (container == null || !ReferenceEquals(container, _gameSceneContainer))
+        {
+            if (timedOut) _loggingService.Info("Wait for video: Theater didn't see this level load, starting the song");
+            return timedOut;
+        }
+
+        if (!_gameSceneVideoPending) return true;   // no playable video, or Theater is off
+
+        if (_videoPlayer.PlayerIsPrepared)
+        {
+            if (heldSeconds >= 0.05f)
+                _loggingService.Info(FormattableString.Invariant(
+                    $"Wait for video: held the song start {heldSeconds * 1000:0} ms until the video loaded"));
+            return true;
+        }
+
+        if (!timedOut) return false;
+        _loggingService.Info("Wait for video: still loading after 3 s, starting the song");
+        return true;
+    }
+
     private void OnMenuSceneLoaded()
     {
+        _lateStartPending = false;
+        _timeSyncController = null;
         _loggingService.Info("MenuSceneLoaded");
         _activeScene = Scene.Menu;
         _firstNoteSongTime = null;
@@ -509,6 +860,14 @@ public class PlaybackManager : MonoBehaviour
             var offset = (DateTime.Now - _audioSourceStartTime).TotalSeconds * TargetVideoSpeed + _offsetAfterPrepare;
             _loggingService.Info($"Adjusting offset after prepare to {offset}");
             player.time = offset;
+        }
+        else if (_lateStartPending)
+        {
+            _lateStartPending = false;
+            var startAt = ClampToVideo(GetTargetTime());
+            player.time = startAt;
+            if (_activeAudioSource != null && _activeAudioSource.time > 0) _lastKnownAudioSourceTime = _activeAudioSource.time;
+            _loggingService.Info(FormattableString.Invariant($"Start sync: video loaded late, starting it at {startAt:0.00} s"));
         }
 
         _offsetAfterPrepare = 0;
@@ -598,11 +957,10 @@ public class PlaybackManager : MonoBehaviour
 
     private string SyncCheckMode => IsPreviewPlaying ? "preview" : _activeScene == Scene.Menu ? "menu" : "song";
 
-    private float VideoToRealSeconds(float videoSeconds) => videoSeconds / Math.Max(0.01f, TargetVideoSpeed);
-
     private void PlayVideo(float startTime)
     {
         CancelStartSync();
+        _lateStartPending = false;
         if (_videoConfig == null)
         {
             _loggingService.Warn("VideoConfig null in PlayVideo");
@@ -665,8 +1023,10 @@ public class PlaybackManager : MonoBehaviour
 
         StopAllCoroutines();
 
+        // Temporary sync check and performance loggers: remove together
         _syncCheckPlayStart = Time.realtimeSinceStartup;
         _syncCheckCount = 0;
+        ResetVideoCadence();
 
         if (_activeAudioSource != null && _activeAudioSource.time > 0)
             _lastKnownAudioSourceTime = _activeAudioSource.time;
@@ -674,18 +1034,17 @@ public class PlaybackManager : MonoBehaviour
         if (totalOffset < 0)
         {
             if (!IsPreviewPlaying)
-                // Wait in real time until the video clock would reach zero.
-                StartCoroutine(PlayVideoDelayedCoroutine(VideoToRealSeconds(-totalOffset)));
+                StartDelayedPlay(armStartSync: true);
             else
             {
                 // In menus we don't need to wait, instead the preview player starts earlier
-                ArmStartSync(delayedStart: false);
+                ArmStartSync(learnable: false);
                 _videoPlayer.Play();
             }
         }
         else
         {
-            ArmStartSync(delayedStart: false);
+            ArmStartSync(learnable: false);
             _videoPlayer.Play();
             if (!_videoPlayer.PlayerIsPrepared)
             {
@@ -706,28 +1065,63 @@ public class PlaybackManager : MonoBehaviour
         _videoPlayer.PlaybackSpeed = TargetVideoSpeed;
     }
 
-    // TODO: Using a stopwatch will not work properly when seeking in the map (e.g. IntroSkip, PracticePlugin)
-    private IEnumerator PlayVideoDelayedCoroutine(float delayStartTime, bool armStartSync = true)
+    private void StartDelayedPlay(bool armStartSync)
+    {
+        if (_delayedPlayRoutine != null) StopCoroutine(_delayedPlayRoutine);
+        _delayedPlayRoutine = StartCoroutine(PlayVideoDelayedCoroutine(armStartSync));
+    }
+
+    private IEnumerator PlayVideoDelayedCoroutine(bool armStartSync)
     {
         var compensationMs = _config.StartDelayCompensationMs;
-        var waitSeconds = Math.Max(0f, delayStartTime - compensationMs / 1000f);
-        _loggingService.Debug(
-            $"Waiting for {waitSeconds} seconds before playing video (start delay compensation {compensationMs} ms)");
-        _playbackDelayStopwatch ??= new Stopwatch();
-        _playbackDelayStopwatch.Start();
+        // The learned start-up delay, in video seconds: Play() is called this much before the video is due
+        var compensationVideo = compensationMs / 1000f * TargetVideoSpeed;
+        _loggingService.Debug($"Waiting for the song clock before playing video (start delay compensation {compensationMs} ms)");
         _videoPlayer.Pause();
         _videoPlayer.Hide();
         _videoPlayer.PlayerTime = 0;
-        yield return new WaitUntil(() => _playbackDelayStopwatch.Elapsed.TotalSeconds >= waitSeconds);
-        _loggingService.Debug("Elapsed ms: " + _playbackDelayStopwatch.ElapsedMilliseconds);
-        _playbackDelayStopwatch.Stop();
-        _playbackDelayStopwatch.Reset();
 
-        if (_activeAudioSource != null && _activeAudioSource.time > 0)
-            _lastKnownAudioSourceTime = _activeAudioSource.time;
+        // Follows the song clock, so a skip (Intro Skip, practice seeks) or a game pause moves the start with the song
+        yield return new WaitUntil(() => _activeAudioSource != null && GetTargetTime() + compensationVideo >= 0);
+        _delayedPlayRoutine = null;
 
-        if (armStartSync) ArmStartSync(delayedStart: true);
+        if (_activeAudioSource!.time > 0) _lastKnownAudioSourceTime = _activeAudioSource.time;
+
+        var lateBy = GetTargetTime() + compensationVideo;   // video seconds past the planned Play() call
+        var prepared = _videoPlayer.PlayerIsPrepared;
+
+        if (prepared && lateBy < 0.1f)
+        {
+            // Normal start: from frame 0, timed by the learned delay
+            if (armStartSync) ArmStartSync(learnable: true);
+            _videoPlayer.Play();
+            yield break;
+        }
+
+        // Late start: never learn from it, since loading time or a skip isn't start-up delay
+        if (armStartSync) ArmStartSync(learnable: false);
+        if (prepared)
+        {
+            var startAt = ClampToVideo(GetTargetTime());
+            _loggingService.Info(FormattableString.Invariant(
+                $"Start sync: song jumped {lateBy * 1000:0} ms past the video start, starting it at {startAt:0.00} s"));
+            _videoPlayer.PlayerTime = startAt;
+        }
+        else
+        {
+            _lateStartPending = true;
+            _loggingService.Info("Start sync: video not loaded when due, it will start in place once loaded");
+        }
+
         _videoPlayer.Play();
+    }
+
+    // Wraps to the video length (like the existing resync code) and never goes below 0
+    private float ClampToVideo(float videoTime)
+    {
+        var duration = _videoPlayer.VideoDuration;
+        if (duration > 0) videoTime %= duration;
+        return Math.Max(0f, videoTime);
     }
 
     private IEnumerator PlayVideoAfterAudioSourceCoroutine(bool preview)
@@ -753,6 +1147,7 @@ public class PlaybackManager : MonoBehaviour
                 {
                     var atsc = Plugin.gameCoreContainer.Resolve<AudioTimeSyncController>();
                     _activeAudioSource = atsc._audioSource;
+                    _timeSyncController = atsc;
                     _loggingService.Debug("Got ATSC from ATSC");
                 }
             }
@@ -816,6 +1211,7 @@ public class PlaybackManager : MonoBehaviour
 
     public void PauseVideo()
     {
+        ResetVideoCadence(); // Temporary performance logger: a pause isn't a video stall
         CancelStartSync();
         StopAllCoroutines();
         if (_videoPlayer.IsPlaying && _videoConfig != null) _videoPlayer.Pause();
@@ -823,14 +1219,15 @@ public class PlaybackManager : MonoBehaviour
 
     public void ResumeVideo()
     {
+        ResetVideoCadence(); // Temporary performance logger: a pause isn't a video stall
         if (!_config.TheaterActive || _videoPlayer.IsPlaying || _videoConfig == null || !_videoConfig.IsPlayable ||
             (_videoPlayer.VideoEnded && _videoConfig.loop != true)) return;
 
         var targetTime = GetTargetTime();
         if (targetTime > 0)
             _videoPlayer.Play();
-        else if (_playbackDelayStopwatch is { IsRunning: false })
-            StartCoroutine(PlayVideoDelayedCoroutine(VideoToRealSeconds(-targetTime), armStartSync: false));
+        else
+            StartDelayedPlay(armStartSync: false);
     }
 
     public void ResyncVideo(float? referenceTime = null)
@@ -843,13 +1240,13 @@ public class PlaybackManager : MonoBehaviour
         else
             newTime = GetTargetTime();
 
-        var delayedStart = newTime < 0;
-        if (delayedStart)
+        if (newTime < 0)
         {
             CancelStartSync();
             _videoPlayer.Hide();
             StopAllCoroutines();
-            StartCoroutine(PlayVideoDelayedCoroutine(VideoToRealSeconds(-newTime)));
+            StartDelayedPlay(armStartSync: true);
+            return;
         }
         else if (newTime > _videoPlayer.VideoDuration && _videoPlayer.VideoDuration > 0)
         {
@@ -858,7 +1255,7 @@ public class PlaybackManager : MonoBehaviour
 
         if (Math.Abs(_videoPlayer.PlayerTime - newTime) < 0.2f) return;
 
-        if (!delayedStart) CancelStartSync();
+        CancelStartSync();
         _videoPlayer.PlayerTime = newTime;
     }
 
@@ -892,10 +1289,10 @@ public class PlaybackManager : MonoBehaviour
 
     #region Start Sync
 
-    private void ArmStartSync(bool delayedStart)
+    private void ArmStartSync(bool learnable)
     {
         _startSyncPhase = StartSyncPhase.WaitingForFirstFrame;
-        _startSyncDelayedStart = delayedStart;
+        _startSyncLearnable = learnable;
         Array.Clear(_startSyncSamples, 0, _startSyncSamples.Length);
         _startSyncSampleCount = 0;
         _startSyncLearned = false;
@@ -963,13 +1360,19 @@ public class PlaybackManager : MonoBehaviour
         {
             _startSyncFirstErrorMs = meanMs;
             var lead = IsPreviewPlaying ? 0 : _config.VideoLeadMs;
-            if (_startSyncDelayedStart && !IsPreviewPlaying)
+            if (_startSyncLearnable && !IsPreviewPlaying && absoluteErrorMs <= 150)
             {
                 var oldComp = _config.StartDelayCompensationMs;
-                var newComp = Math.Max(0, Math.Min(200, (int)Math.Round(oldComp - 0.5 * meanMs)));
+                var step = Math.Max(-15, Math.Min(15, (int)Math.Round(-0.5 * meanMs)));
+                var newComp = Math.Max(0, Math.Min(200, oldComp + step));
                 if (newComp != oldComp) _config.StartDelayCompensationMs = newComp;
                 _loggingService.Info(FormattableString.Invariant(
                     $"Start sync: {mode} first frame {_startSyncFirstErrorMs:+0;-0;0} ms from target (lead {lead} ms); start delay compensation {oldComp} -> {newComp} ms"));
+            }
+            else if (_startSyncLearnable && !IsPreviewPlaying && absoluteErrorMs > 150)
+            {
+                _loggingService.Info(FormattableString.Invariant(
+                    $"Start sync: {mode} first frame {meanMs:+0;-0;0} ms from target (lead {lead} ms); not learning from an outlier"));
             }
             else
             {
@@ -1118,6 +1521,15 @@ public class PlaybackManager : MonoBehaviour
         CancelStartSync();
         if (!_videoPlayer.IsPlaying || _activeAudioSource == null) return;
 
+        if (_videoPlayer.PlayerTime + offset / 1000f < 0)
+        {
+            // The video now starts later than the song's current point. There's no seek to wait for: keep the audio running
+            // and let the delayed play start the video on the song clock.
+            ApplyOffsetToVideo(offset);
+            _loggingService.Info("Applying offset: " + offset);
+            return;
+        }
+
         // Pause the preview audio source and start seeking. Audio Source will be re-enabled after video player draws its next frame
         _videoPlayer.IsSyncing = true;
         _activeAudioSource.Pause();
@@ -1138,7 +1550,8 @@ public class PlaybackManager : MonoBehaviour
         {
             _videoPlayer.Hide();
             StopAllCoroutines();
-            StartCoroutine(PlayVideoDelayedCoroutine(VideoToRealSeconds((float)-newTime)));
+            StartDelayedPlay(armStartSync: true);
+            return;
         }
         else if (newTime > _videoPlayer.VideoDuration && _videoPlayer.VideoDuration > 0)
         {
@@ -1266,6 +1679,7 @@ public class PlaybackManager : MonoBehaviour
 
     public void StopPreview(bool stopPreviewMusic)
     {
+        _lateStartPending = false;
         CancelStartSync();
         if (!IsPreviewPlaying) return;
         _loggingService.Debug($"Stopping preview (stop audio source: {stopPreviewMusic}");

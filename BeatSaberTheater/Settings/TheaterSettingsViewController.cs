@@ -29,6 +29,13 @@ internal class TheaterSettingsViewController
         set => _displaySettings.TheaterEnabled = value;
     }
 
+    [UIValue("wait-for-video")]
+    public bool WaitForVideoBeforeSong
+    {
+        get => _config.WaitForVideoBeforeSong;
+        set => _config.WaitForVideoBeforeSong = value;
+    }
+
     [UIValue("override-environment")]
     public bool OverrideEnvironment
     {

@@ -8,6 +8,8 @@
         <modifier-container child-expand-width='true' horizontal-fit='PreferredSize'>
             <bool-setting apply-on-change="true" text='Enable Theater' value='show-video' get-event='refresh-values'
                           hover-hint='Enable or disable video playback and other features&#xD;&#xA;&#xD;&#xA;Recommended: On'></bool-setting>
+            <bool-setting apply-on-change="true" text='Wait for Video Before Song' value='wait-for-video'
+                          hover-hint='Holds the start of a solo song until its video has loaded (at most 3 seconds), so the video starts in sync from its first frame. Adds up to about 2 seconds to some starts and restarts.&#xD;&#xA;&#xD;&#xA;Default: Off'></bool-setting>
             <dropdown-list-setting apply-on-change="true" text='Download Quality' value='quality'
                                    options='modes'></dropdown-list-setting>
             <dropdown-list-setting apply-on-change="true" text='Format' value='format'

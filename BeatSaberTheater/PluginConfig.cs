@@ -38,6 +38,9 @@ public class PluginConfig
     // Updated by PlaybackManager after each delayed start. Not shown in the UI.
     public virtual int StartDelayCompensationMs { get; set; } = 0;
 
+    // Hold the start of a solo song (at most 3 s) until its video has loaded, so it starts in sync from its first frame.
+    public virtual bool WaitForVideoBeforeSong { get; set; } = false;
+
     // Display settings, in percent. See Settings/DisplaySettings.cs for ranges.
     public virtual int ScreenBrightness { get; set; } = 100;
     public virtual int ScreenScale { get; set; } = 100;
