@@ -72,6 +72,9 @@ public class PlaybackManager : MonoBehaviour
     private double _startSyncFirstErrorMs;
     private bool _startSyncLearned;
     private float? _firstNoteSongTime;
+    // Start sync stops this long before the first note is hit, and never re-arms after that point
+    private const float FirstNoteMarginSeconds = 0.15f;
+    private bool _firstNoteReached;   // this play reached its first note; start sync never re-arms after that
 
     // Temporary sync check logger: remove together with the performance logger
     private int _syncCheckCount;
@@ -532,6 +535,10 @@ public class PlaybackManager : MonoBehaviour
         if (_activeAudioSource == null || _videoConfig == null) return;
 
         var audioSourceTime = _activeAudioSource.time;
+        // Once this play reaches its first note, start sync never re-arms (the user's rule: nothing changes after that)
+        if (!_firstNoteReached && _firstNoteSongTime is { } firstNoteTime &&
+            audioSourceTime >= firstNoteTime - FirstNoteMarginSeconds)
+            _firstNoteReached = true;
 
         if (_videoPlayer.IsFading)
         {
@@ -649,6 +656,7 @@ public class PlaybackManager : MonoBehaviour
         _gameSceneVideoPending = false;
         _lateStartPending = false;
         _timeSyncController = null;
+        _firstNoteReached = false;
         StopAllCoroutines();
         _loggingService.Info("GameSceneLoaded");
 
@@ -817,6 +825,7 @@ public class PlaybackManager : MonoBehaviour
         _loggingService.Info("MenuSceneLoaded");
         _activeScene = Scene.Menu;
         _firstNoteSongTime = null;
+        _firstNoteReached = false;
         _videoPlayer.Hide();
         _videoPlayer.ResetScreens();
         StopAllCoroutines();
@@ -1033,8 +1042,9 @@ public class PlaybackManager : MonoBehaviour
 
         if (totalOffset < 0)
         {
+            // Only song starts teach the start-up delay: menu starts follow the preview audio and vary far more
             if (!IsPreviewPlaying)
-                StartDelayedPlay(armStartSync: true);
+                StartDelayedPlay(armStartSync: true, learnable: _activeScene == Scene.SoloGameplay);
             else
             {
                 // In menus we don't need to wait, instead the preview player starts earlier
@@ -1065,20 +1075,21 @@ public class PlaybackManager : MonoBehaviour
         _videoPlayer.PlaybackSpeed = TargetVideoSpeed;
     }
 
-    private void StartDelayedPlay(bool armStartSync)
+    private void StartDelayedPlay(bool armStartSync, bool learnable)
     {
         if (_delayedPlayRoutine != null) StopCoroutine(_delayedPlayRoutine);
-        _delayedPlayRoutine = StartCoroutine(PlayVideoDelayedCoroutine(armStartSync));
+        _delayedPlayRoutine = StartCoroutine(PlayVideoDelayedCoroutine(armStartSync, learnable));
     }
 
-    private IEnumerator PlayVideoDelayedCoroutine(bool armStartSync)
+    private IEnumerator PlayVideoDelayedCoroutine(bool armStartSync, bool learnable)
     {
         var compensationMs = _config.StartDelayCompensationMs;
         // The learned start-up delay, in video seconds: Play() is called this much before the video is due
         var compensationVideo = compensationMs / 1000f * TargetVideoSpeed;
         _loggingService.Debug($"Waiting for the song clock before playing video (start delay compensation {compensationMs} ms)");
         _videoPlayer.Pause();
-        _videoPlayer.Hide();
+        // Not Hide(): it would stop and unload the video loaded at scene start (see HideKeepLoaded)
+        _videoPlayer.HideKeepLoaded();
         _videoPlayer.PlayerTime = 0;
 
         // Follows the song clock, so a skip (Intro Skip, practice seeks) or a game pause moves the start with the song
@@ -1092,8 +1103,14 @@ public class PlaybackManager : MonoBehaviour
 
         if (prepared && lateBy < 0.1f)
         {
-            // Normal start: from frame 0, timed by the learned delay
-            if (armStartSync) ArmStartSync(learnable: true);
+            // Normal start: from frame 0, timed by the learned delay. Learn only if this check ran on time: a frame hitch
+            // that delayed it would be learned as start-up delay. Under 40 ms covers one frame plus one audio buffer.
+            var lateMs = lateBy / TargetVideoSpeed * 1000f;
+            var onTime = lateMs < 40f;
+            if (armStartSync && learnable && !onTime)
+                _loggingService.Info(FormattableString.Invariant(
+                    $"Start sync: the video start ran {lateMs:0} ms late (frame hitch), not learning from it"));
+            if (armStartSync) ArmStartSync(learnable && onTime);
             _videoPlayer.Play();
             yield break;
         }
@@ -1206,6 +1223,7 @@ public class PlaybackManager : MonoBehaviour
         }
 
         _firstNoteSongTime = preview ? null : FindFirstNoteSongTime(startTime);
+        _firstNoteReached = false;
         PlayVideo(startTime);
     }
 
@@ -1223,11 +1241,16 @@ public class PlaybackManager : MonoBehaviour
         if (!_config.TheaterActive || _videoPlayer.IsPlaying || _videoConfig == null || !_videoConfig.IsPlayable ||
             (_videoPlayer.VideoEnded && _videoConfig.loop != true)) return;
 
+        // PauseVideo cancelled any running start check; a pause before the first note gets a fresh one
+        var recheck = CanRearmStartSync("resume");
         var targetTime = GetTargetTime();
         if (targetTime > 0)
+        {
             _videoPlayer.Play();
+            if (recheck) ArmStartSync(learnable: false);
+        }
         else
-            StartDelayedPlay(armStartSync: false);
+            StartDelayedPlay(armStartSync: recheck, learnable: false);
     }
 
     public void ResyncVideo(float? referenceTime = null)
@@ -1243,9 +1266,11 @@ public class PlaybackManager : MonoBehaviour
         if (newTime < 0)
         {
             CancelStartSync();
-            _videoPlayer.Hide();
+            _videoPlayer.HideKeepLoaded();
             StopAllCoroutines();
-            StartDelayedPlay(armStartSync: true);
+            // Menu and preview keep their own start check; in a song only before the first note (CanRearmStartSync)
+            StartDelayedPlay(armStartSync: _activeScene != Scene.SoloGameplay || CanRearmStartSync("seek"),
+                learnable: false);
             return;
         }
         else if (newTime > _videoPlayer.VideoDuration && _videoPlayer.VideoDuration > 0)
@@ -1257,6 +1282,8 @@ public class PlaybackManager : MonoBehaviour
 
         CancelStartSync();
         _videoPlayer.PlayerTime = newTime;
+        // A seek before the first note (Intro Skip, or the 300 ms rule at the start) gets a fresh start check
+        if (CanRearmStartSync("seek")) ArmStartSync(learnable: false);
     }
 
     // Called when the user moves the speed slider: re-time the running video to the new speed
@@ -1302,6 +1329,21 @@ public class PlaybackManager : MonoBehaviour
     {
         if (_startSyncPhase == StartSyncPhase.Nudging) RestoreStartSyncSpeed();
         _startSyncPhase = StartSyncPhase.Off;
+    }
+
+    // Start sync may run again after a seek or a resume only in a song, and only while this play hasn't reached its
+    // first note (the user's rule: the video never changes once notes are being hit). An unknown first note means no.
+    private bool CanRearmStartSync(string reason)
+    {
+        if (_activeScene != Scene.SoloGameplay || IsPreviewPlaying || _activeAudioSource == null) return false;
+        if (_firstNoteReached || _firstNoteSongTime is not { } firstNoteTime) return false;
+
+        var songTime = _activeAudioSource.time;
+        if (songTime >= firstNoteTime - FirstNoteMarginSeconds) return false;
+
+        _loggingService.Info(FormattableString.Invariant(
+            $"Start sync: re-checking after a {reason} at song {songTime:0.00} s (first note at {firstNoteTime:0.00} s)"));
+        return true;
     }
 
     private void RestoreStartSyncSpeed()
@@ -1414,7 +1456,7 @@ public class PlaybackManager : MonoBehaviour
         if (_firstNoteSongTime is not { } firstNoteTime) return _startSyncFirstFrameTime + 1.5f;
 
         // Song time advances at the selected gameplay or practice speed.
-        var noteDeadline = now + (firstNoteTime - 0.15f - audioSourceTime) / _songSpeed;
+        var noteDeadline = now + (firstNoteTime - FirstNoteMarginSeconds - audioSourceTime) / _songSpeed;
         return Math.Min(_startSyncFirstFrameTime + 3f, noteDeadline);
     }
 
@@ -1548,9 +1590,9 @@ public class PlaybackManager : MonoBehaviour
 
         if (newTime < 0)
         {
-            _videoPlayer.Hide();
+            _videoPlayer.HideKeepLoaded();
             StopAllCoroutines();
-            StartDelayedPlay(armStartSync: true);
+            StartDelayedPlay(armStartSync: true, learnable: false);
             return;
         }
         else if (newTime > _videoPlayer.VideoDuration && _videoPlayer.VideoDuration > 0)

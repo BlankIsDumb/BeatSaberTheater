@@ -344,6 +344,22 @@ public class CustomVideoPlayer : MonoBehaviour
         FadeOut(0);
     }
 
+    // Hides the screen at once, like Hide(), but keeps the video loaded. Hide() sets _waitingForFadeOut, so the fade
+    // reaching 0 calls Stop(), which unloads the player. A delayed start waiting for the song clock needs the video that
+    // was loaded at scene start to stay loaded.
+    public void HideKeepLoaded()
+    {
+        _waitingForFadeOut = false;
+        // A Play() still waiting for its first frame would fade the screen back in on any frame the paused player shows
+        // (for example after the seek to 0). Play() subscribes it again when the video really starts.
+        _player.frameReady -= FirstFrameReady;
+        _firstFrameStopwatch.Reset();
+        _easingHandler.EaseOut(0);
+        _screenManager.SetScreensActive(false);
+        Shader.SetGlobalInt(TheaterStatusProperty, 0);
+        stopped?.Invoke();
+    }
+
     public void FadeOut(float duration = 0.7f)
     {
         _waitingForFadeOut = true;
@@ -396,6 +412,9 @@ public class CustomVideoPlayer : MonoBehaviour
     {
         stopped?.Invoke();
         _waitingForFadeOut = false;
+        // A newly loaded video hasn't ended. Without this, a video that ended in the previous attempt blocked
+        // ResumeVideo after a restart, until the new attempt's video started.
+        VideoEnded = false;
         _player.Prepare();
     }
 
