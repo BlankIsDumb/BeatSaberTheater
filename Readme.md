@@ -5,13 +5,30 @@ videos for your favorite songs while you play!
 
 This mod is a rewrite/successor to the [Cinema mod](https://github.com/Kevga/BeatSaberCinema).
 
+> **This is a fork** of [BeatSaberTheater](https://github.com/BeatSaberTheater/BeatSaberTheater), made for **Beat Saber 1.40.8**
+> and mostly vibecoded, multiple independent agents check and in game test were run (no shit, im the player).
+> For the original mod, see the upstream repository.
+
+### What this fork adds
+
+* **Auto sync:** matches the video's audio to the song and suggests offsets you can try and apply.
+* **Finer sync controls:** ±5 ms steps, a playback speed slider, the offset shown against the map's default, and
+  Revert sync.
+* **Start sync:** every video start is measured against the song and nudged into place, including after pauses,
+  seeks and Intro Skip. The Video Lead and Sync Correction settings control it.
+* **Display settings in the Theater tab:** on/off, brightness, screen size, corner roundness, edge softness and
+  bloom, applied live.
+* **Brightness Limit:** dims bright scenes and flashes so the screen stays below a level you set.
+* **Fixes:** the environment override on 1.40.8, deleting a loaded video breaking all playback until a restart, and
+  more.
+
 ## Installation
 
 This mod is not yet available on BeatMods and must be installed manually.
 
 ### Manual Installation
 
-1. Download the latest release from [here](https://github.com/neboman11/BeatSaberTheater/releases/latest).
+1. Download the latest release from [here](https://github.com/BlankIsDumb/BeatSaberTheater/releases/latest).
 2. Copy the contents of the zip into your current Beat Saber directory (the one with `Beat Saber.exe`).
 3. That's it! Theater is now installed
 
@@ -102,4 +119,9 @@ You can create a `yt-dlp.conf` file in either the `UserData` or `Library/Theater
 ```
 
 For a complete list of yt-dlp options, see the [yt-dlp documentation](https://github.com/yt-dlp/yt-dlp#general-options) and [yt-dlp configuration guide](https://github.com/yt-dlp/yt-dlp#configuration).
+
+### Debug logging
+
+For detailed sync and performance logs, set `"DebugLogging": true` in `UserData/BeatSaberTheater.json`. It's off by
+default, because it costs a little every frame in songs and fills the log.
 
