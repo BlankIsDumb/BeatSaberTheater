@@ -229,8 +229,8 @@ public class PlaybackManager : MonoBehaviour
             !_videoPlayer.IsPlaying && !_videoPlayer.IsStarting && !_videoPlayer.IsFading)
             ShowWhiteTestIfPreviewOpen();
 
-        // Temporary performance logger: remove together with the sync check logger
-        if (_activeScene != Scene.SoloGameplay)
+        // Temporary performance logger: remove together with the sync check logger. Runs only with DebugLogging on.
+        if (_activeScene != Scene.SoloGameplay || !_config.DebugLogging)
         {
             StopPerfLogger();
             return;
@@ -654,8 +654,9 @@ public class PlaybackManager : MonoBehaviour
                                   TheaterFileHelpers.FormatFloat(audioSourceTime) + " - Error (ms): " +
                                   Math.Round(error * 1000));
 
-        // Temporary sync check logger: remove together with the performance logger
-        if (_videoPlayer.IsPlaying && !_videoPlayer.IsSyncing) RecordSyncCheck(playerTime - referenceTime, audioSourceTime);
+        // Temporary sync check logger: remove together with the performance logger. Runs only with DebugLogging on.
+        if (_config.DebugLogging && _videoPlayer.IsPlaying && !_videoPlayer.IsSyncing)
+            RecordSyncCheck(playerTime - referenceTime, audioSourceTime);
 
         if (_videoConfig.endVideoAt.HasValue)
         {

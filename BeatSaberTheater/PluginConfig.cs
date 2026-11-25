@@ -63,4 +63,9 @@ public class PluginConfig
 
     // yt-dlp Configuration
     public virtual bool YtDlpAutoConfig { get; set; } = false;
+
+    // Development logging: the per-song performance logger, the sync check lines and the brightness limiter's timing
+    // and slider lines. Not in the UI; set it to true in the config file. Off by default, since it costs a little
+    // every frame in songs and fills the log.
+    public virtual bool DebugLogging { get; set; } = false;
 }

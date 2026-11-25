@@ -319,8 +319,8 @@ public class LightManager : MonoBehaviour
         PushLimiterGain(_limiter.MaterialGain);
         UpdateColor(_color);
 
-        // Temporary brightness limiter logging
-        if (limitChanged)
+        // Temporary brightness limiter logging, only with DebugLogging on (one line per slider step)
+        if (limitChanged && _config.DebugLogging)
             _loggingService.Info(limit >= DisplaySettings.MaxBrightnessLimit
                 ? "Brightness limiter: off"
                 : FormattableString.Invariant($"Brightness limiter: limit {limit}% ({_limiter.LimitLinear:0.000} linear)"));
