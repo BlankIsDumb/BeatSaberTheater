@@ -1,9 +1,11 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
 using BeatSaberTheater.Harmony.Patches;
 using BeatSaberTheater.Screen;
+using BeatSaberTheater.Settings;
 using BeatSaberTheater.Util;
 using BS_Utils.Utilities;
 using UnityEngine;
@@ -15,8 +17,22 @@ namespace BeatSaberTheater.Environment;
 
 public class LightManager : MonoBehaviour
 {
-    private AsyncGPUReadbackRequest? _readbackRequest;
+    private bool _readbackPending;
+    private bool _useReadbackLuminance;
+    private bool _snapOnNextReadback;
+    private bool? _decodeReadbackColor;
+    private Action<AsyncGPUReadbackRequest> _readbackCallback = null!;
+    private readonly BrightnessLimiter _limiter = new();
+    private float _lastMaterialGain = 1f;
+
+    // Temporary brightness limiter logging. The 5 s window fits up to ~400 readbacks/sec without growing the buffer.
     private readonly Stopwatch _readbackRequestStopwatch = new();
+    private bool _collectLimiterPerf;
+    private int _limiterDimmedFrames;
+    private float _lowestLimiterGain = 1f;
+    private readonly double[] _readbackDelaysMs = new double[2048];
+    private int _readbackDelayCount;
+    private double _maxReadbackDelayMs;
 
     private GameObject _lightGameObject = null!;
     private DirectionalLight _light = null!;
@@ -25,6 +41,7 @@ public class LightManager : MonoBehaviour
     private MaterialLightWithId? _menuFloorLight;
     private InstancedMaterialLightWithId? _menuFogRing;
     private bool _menuReferencesSet;
+    private bool _useMenuLighting;
     private CustomVideoPlayer _videoPlayer = null!;
 
     private const int INITIAL_DOWNSCALING_SIZE = 128;
@@ -41,11 +58,15 @@ public class LightManager : MonoBehaviour
     private const float MAX_BYTE_AS_FLOAT = byte.MaxValue;
 
     [Inject] private readonly LoggingService _loggingService = null!;
+    [Inject] private readonly PluginConfig _config = null!;
 
     internal void Startup(CustomVideoPlayer videoPlayer)
     {
         _videoPlayer = videoPlayer;
         if (_lightGameObject == null) CreateLight();
+        _useMenuLighting = TheaterFileHelpers.GetEnvironmentName() == "MainMenu";
+        _limiter.SetLevels(_config.ScreenBrightness, GetBrightnessLimit());
+        _readbackCallback = OnReadbackComplete;
 
         _videoPlayer.AddFrameReadyEventHandler(ProcessFrame);
         _videoPlayer.stopped += VideoStopped;
@@ -66,6 +87,27 @@ public class LightManager : MonoBehaviour
             var size = (int)Math.Pow(2, textureCount - i);
             _downscaleTextures.Add(new RenderTexture(size, size, 0));
         }
+    }
+
+    private void Update()
+    {
+        // SnapLimiter applies unity gain as soon as Off is selected, so this is the whole idle path.
+        if (_limiter.Limit >= DisplaySettings.MaxBrightnessLimit) return;
+
+        _limiter.Step(Time.unscaledDeltaTime);
+
+        // Temporary: count dimmed Unity frames here. The song perf window already counts every Unity frame.
+        if (_collectLimiterPerf)
+        {
+            _lowestLimiterGain = Mathf.Min(_lowestLimiterGain, _limiter.Gain);
+            if (_limiter.Gain < 0.98f) _limiterDimmedFrames++;
+        }
+
+        var materialGain = _limiter.MaterialGain;
+        if (Mathf.Abs(materialGain - _lastMaterialGain) <= 0.002f) return;
+
+        PushLimiterGain(materialGain);
+        UpdateColor(_color);
     }
 
     private void OnDisable()
@@ -104,7 +146,10 @@ public class LightManager : MonoBehaviour
         euler.x = LIGHT_X_ROTATION;
         _light.intensity = DIRECTIONAL_LIGHT_INTENSITY_GAMEPLAY;
 
-        switch (TheaterFileHelpers.GetEnvironmentName())
+        // Cache the scene check so limiter pushes don't enumerate scenes and fetch their names each frame.
+        var environmentName = TheaterFileHelpers.GetEnvironmentName();
+        _useMenuLighting = environmentName == "MainMenu";
+        switch (environmentName)
         {
             case "BillieEnvironment":
                 //Tone down lighting on this env a bit, since clouds get pretty bright
@@ -128,6 +173,7 @@ public class LightManager : MonoBehaviour
 
     private void OnMenuSceneLoaded()
     {
+        _useMenuLighting = true;
         var euler = _lightGameObject.transform.eulerAngles;
         euler.x = LIGHT_X_ROTATION;
         _lightGameObject.transform.eulerAngles = euler;
@@ -184,6 +230,10 @@ public class LightManager : MonoBehaviour
 
     private void VideoStopped()
     {
+        // A readback from the stopped video can still finish; it must not dim the next video.
+        _useReadbackLuminance = false;
+        _limiter.Reset();
+        PushLimiterGain(1f);
         UpdateColor(Color.black);
     }
 
@@ -193,19 +243,151 @@ public class LightManager : MonoBehaviour
 
         var lowResTex = Downscale(source.texture);
 
-        // Don't start a new readback until the currently running one is finished
-        // Not sure if this is necessary, but it does prevent callbacks arriving out-of-order
-        if (_readbackRequest is { done: false }) return;
+        // Keep one readback in flight so the callback gets the matching timing and luminance validity.
+        if (_readbackPending) return;
 
-        _readbackRequestStopwatch.Restart();
-        _readbackRequest = AsyncGPUReadback.Request(lowResTex, 0, req =>
+        _readbackPending = true;
+        _useReadbackLuminance = true;
+        _readbackRequestStopwatch.Restart(); // Temporary brightness limiter timing
+        AsyncGPUReadback.Request(lowResTex, 0, _readbackCallback);
+    }
+
+    private void OnReadbackComplete(AsyncGPUReadbackRequest request)
+    {
+        _readbackPending = false;
+        if (request.hasError) return;
+        if (!_useReadbackLuminance) return;
+
+        var limiterOff = _limiter.Limit >= DisplaySettings.MaxBrightnessLimit;
+        var delayMs = limiterOff ? 0d : _readbackRequestStopwatch.Elapsed.TotalMilliseconds; // Temporary brightness limiter timing
+        // Read the RGBA channels directly to avoid allocating an array for the single pixel.
+        var pixel = request.GetData<Color32>()[0];
+        var color = new Color(pixel.r / MAX_BYTE_AS_FLOAT, pixel.g / MAX_BYTE_AS_FLOAT, pixel.b / MAX_BYTE_AS_FLOAT);
+        UpdateColor(color);
+
+        if (_decodeReadbackColor is not { } decode)
         {
-            var pixelData = req.GetData<uint>();
-            var byteArray = BitConverter.GetBytes(pixelData[0]);
-            var color = new Color(byteArray[0] / MAX_BYTE_AS_FLOAT, byteArray[1] / MAX_BYTE_AS_FLOAT,
-                byteArray[2] / MAX_BYTE_AS_FLOAT);
-            UpdateColor(color);
-        });
+            var colorSpace = QualitySettings.activeColorSpace;
+            var readbackSrgb = _downscaleTextures[_downscaleTextures.Count - 1].sRGB;
+            decode = colorSpace != ColorSpace.Linear || readbackSrgb;
+            _decodeReadbackColor = decode;
+
+            // Temporary brightness limiter logging
+            _loggingService.Info($"Brightness limiter: colour space {colorSpace}, readback texture sRGB " +
+                                 $"{(readbackSrgb ? "true" : "false")}, decoding {(decode ? "true" : "false")}");
+        }
+
+        if (limiterOff)
+        {
+            _limiter.Luminance = 0f;
+            return;
+        }
+
+        // A linear project's non-sRGB render target already stores linear values.
+        var r = decode ? Mathf.GammaToLinearSpace(color.r) : color.r;
+        var g = decode ? Mathf.GammaToLinearSpace(color.g) : color.g;
+        var b = decode ? Mathf.GammaToLinearSpace(color.b) : color.b;
+        _limiter.Luminance = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+        if (_snapOnNextReadback)
+        {
+            _snapOnNextReadback = false;
+            _limiter.Snap();
+            PushLimiterGain(_limiter.MaterialGain);
+            UpdateColor(_color);
+        }
+
+        RecordLimiterReadbackDelay(delayMs); // Temporary brightness limiter timing
+    }
+
+    internal void SetMapFactor(float mapFactor)
+    {
+        _limiter.MapFactor = mapFactor;
+    }
+
+    internal void SnapOnFirstFrame()
+    {
+        // Keep the current gain until the new video's luminance is available.
+        _snapOnNextReadback = true;
+    }
+
+    internal void SnapLimiter()
+    {
+        var limit = GetBrightnessLimit();
+        var limitChanged = limit != _limiter.Limit; // Temporary brightness limiter logging
+        _limiter.SetLevels(_config.ScreenBrightness, limit);
+        _limiter.Snap();
+        PushLimiterGain(_limiter.MaterialGain);
+        UpdateColor(_color);
+
+        // Temporary brightness limiter logging
+        if (limitChanged)
+            _loggingService.Info(limit >= DisplaySettings.MaxBrightnessLimit
+                ? "Brightness limiter: off"
+                : FormattableString.Invariant($"Brightness limiter: limit {limit}% ({_limiter.LimitLinear:0.000} linear)"));
+    }
+
+    internal void ShowWhiteTest(bool on)
+    {
+        // The test owns luminance until video playback takes over, even if an earlier readback is still pending.
+        _useReadbackLuminance = false;
+        if (on)
+        {
+            _limiter.Luminance = 1f;
+            SnapLimiter();
+        }
+        else
+        {
+            _limiter.Reset();
+            PushLimiterGain(1f);
+            UpdateColor(_color);
+        }
+    }
+
+    private int GetBrightnessLimit() =>
+        Mathf.Clamp(_config.BrightnessLimit, DisplaySettings.MinBrightnessLimit, DisplaySettings.MaxBrightnessLimit);
+
+    private void PushLimiterGain(float materialGain)
+    {
+        _videoPlayer.SetLimiterGain(materialGain);
+        _lastMaterialGain = materialGain;
+    }
+
+    // ---- Temporary brightness limiter performance logging ----
+    private void RecordLimiterReadbackDelay(double delayMs)
+    {
+        if (!_collectLimiterPerf) return;
+        if (_readbackDelayCount < _readbackDelaysMs.Length)
+            _readbackDelaysMs[_readbackDelayCount++] = delayMs;
+        _maxReadbackDelayMs = Math.Max(_maxReadbackDelayMs, delayMs);
+    }
+
+    internal void LogLimiterPerfWindow(float songTime, int frameCount)
+    {
+        var median = 0d;
+        if (_readbackDelayCount > 0)
+        {
+            Array.Sort(_readbackDelaysMs, 0, _readbackDelayCount);
+            var middle = _readbackDelayCount / 2;
+            median = (_readbackDelaysMs[middle] + _readbackDelaysMs[(_readbackDelayCount - 1) / 2]) / 2;
+        }
+
+        var setting = _limiter.Limit >= DisplaySettings.MaxBrightnessLimit
+            ? "off"
+            : _limiter.Limit.ToString(CultureInfo.InvariantCulture) + "%";
+        var dimmedPercent = 100f * _limiterDimmedFrames / frameCount;
+        _loggingService.Info(string.Format(CultureInfo.InvariantCulture,
+            "Brightness limiter (song at {0:0.0} s): {1}, lowest gain {2:0.00}, dimmed {3:0} % of frames, " +
+            "readback delay median {4:0.0} ms, max {5:0.0} ms",
+            songTime, setting, _lowestLimiterGain, dimmedPercent, median, _maxReadbackDelayMs));
+    }
+
+    internal void ResetLimiterPerfWindow(bool active)
+    {
+        _collectLimiterPerf = active;
+        _limiterDimmedFrames = 0;
+        _lowestLimiterGain = 1f;
+        _readbackDelayCount = 0;
+        _maxReadbackDelayMs = 0d;
     }
 
     private void UpdateColor(Color color)
@@ -213,7 +395,7 @@ public class LightManager : MonoBehaviour
         _color = color;
         _light.color = _color * _videoPlayer.ScreenColor;
 
-        if (TheaterFileHelpers.GetEnvironmentName() != "MainMenu") return;
+        if (!_useMenuLighting) return;
 
         //Darken the base menu lighting
         var baseColor = MenuColorPatch.BaseColor *
@@ -222,25 +404,17 @@ public class LightManager : MonoBehaviour
 
         if (_menuFloorLight != null)
         {
-            var colors = new[] { baseColor, _light.color * MENU_FLOOR_INTENSITY };
-            var combinedColor = AddColors(colors);
+            var combinedColor = baseColor + _light.color * MENU_FLOOR_INTENSITY;
+            combinedColor.a = 1f;
             _menuFloorLight.ColorWasSet(combinedColor);
         }
 
         if (_menuFogRing != null)
         {
-            var colors = new[] { baseColor, _light.color * MENU_FOG_INTENSITY };
-            var combinedColor = AddColors(colors);
+            var combinedColor = baseColor + _light.color * MENU_FOG_INTENSITY;
+            combinedColor.a = 1f;
             _menuFogRing.ColorWasSet(combinedColor);
         }
-    }
-
-    private static Color AddColors(params Color[] aColors)
-    {
-        var result = new Color(0, 0, 0, 0);
-        result = aColors.Aggregate(result, (current, c) => current + c);
-        result.a = 1;
-        return result;
     }
 
     private RenderTexture Downscale(Texture tex)

@@ -30,11 +30,14 @@ public class CustomVideoPlayer : MonoBehaviour
     private const string MAIN_TEXTURE_NAME = "_MainTex";
     private const string THEATER_TEXTURE_NAME = "_CinemaVideoTexture";
     private const string STATUS_PROPERTY_NAME = "_CinemaVideoIsPlaying";
-    private const float MAX_BRIGHTNESS = 0.92f;
+    internal const float MAX_BRIGHTNESS = 0.92f;
+    private float _limiterGain = 1f;
+    private bool _showingTestTexture;
     // Full screen colour at fade value 1, scaled by the player's brightness setting. Fades, the light cast by the screen
     // and the bloom pre-pass all use this colour, so they dim along with it.
     private Color ScreenColorOn =>
-        Color.white.ColorWithAlpha(0f) * (MAX_BRIGHTNESS * Mathf.Clamp(_config.ScreenBrightness, 0, 100) / 100f);
+        Color.white.ColorWithAlpha(0f) * (MAX_BRIGHTNESS * Mathf.Clamp(_config.ScreenBrightness, 0, 100) / 100f) *
+        _limiterGain;
     private readonly Color _screenColorOff = Color.clear;
     private static int? _mainTex;
     private static int MainTex => _mainTex ??= Shader.PropertyToID(MAIN_TEXTURE_NAME);
@@ -310,6 +313,15 @@ public class CustomVideoPlayer : MonoBehaviour
         ScreenColor = ScreenColorOn * _easingHandler.Value;
     }
 
+    public void SetLimiterGain(float gain)
+    {
+        gain = Mathf.Clamp01(gain);
+        if (gain == _limiterGain) return;
+
+        _limiterGain = gain;
+        RefreshBrightness();
+    }
+
     public void SetBrightness(float brightness)
     {
         _easingHandler.Value = brightness;
@@ -420,6 +432,13 @@ public class CustomVideoPlayer : MonoBehaviour
 
     private void Update()
     {
+        if (_showingTestTexture)
+        {
+            // A prepared, paused video still has a texture. Only live playback takes over from the white test.
+            if (!_player.isPlaying) return;
+            _showingTestTexture = false;
+        }
+
         if (_player.isPlaying || (_player.isPrepared && _player.isPaused)) SetTexture(_player.texture);
     }
 
@@ -461,8 +480,18 @@ public class CustomVideoPlayer : MonoBehaviour
         _screenManager.SetShaderParameters(null);
     }
 
+    public void ShowTestTexture(Texture texture)
+    {
+        _showingTestTexture = true;
+        SetTexture(texture);
+        SetDefaultMenuPlacement();
+        _screenManager.SetShaderParameters(null);
+        FadeIn(0.2f);
+    }
+
     public void ClearTexture()
     {
+        _showingTestTexture = false;
         var rt = RenderTexture.active;
         RenderTexture.active = _renderTexture;
         GL.Clear(true, true, Color.black);

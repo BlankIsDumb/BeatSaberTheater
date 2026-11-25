@@ -48,6 +48,9 @@ public class PluginConfig
 
     // Display settings, in percent. See Settings/DisplaySettings.cs for ranges.
     public virtual int ScreenBrightness { get; set; } = 100;
+
+    // 100 = off; lower values cap the screen's average brightness on the same scale as Brightness.
+    public virtual int BrightnessLimit { get; set; } = 100;
     public virtual int ScreenScale { get; set; } = 100;
     public virtual int EdgeSoftness { get; set; }
     public virtual VideoQuality.Mode QualityMode { get; set; } = VideoQuality.Mode.Q720P;

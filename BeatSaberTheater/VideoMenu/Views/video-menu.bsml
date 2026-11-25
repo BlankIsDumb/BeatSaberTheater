@@ -174,6 +174,10 @@
                                 min='10' max='100' increment='5' integer-only='true' apply-on-change='true'
                                 formatter='format-percent' get-event='refresh-display-values'
                                 hover-hint='Dims the video and its glow.'/>
+                <slider-setting id='display-brightness-limit-setting' text='Brightness Limit' value='display-brightness-limit'
+                                min='5' max='100' increment='5' integer-only='true' apply-on-change='true'
+                                formatter='format-brightness-limit' get-event='refresh-display-values'
+                                hover-hint='Dims bright scenes and flashes so the screen stays below this level. Further left dims more. Off at the far right.'/>
                 <slider-setting id='display-size-setting' text='Screen size' value='display-screen-size'
                                 min='25' max='300' increment='5' integer-only='true' apply-on-change='true'
                                 formatter='format-percent' get-event='refresh-display-values'

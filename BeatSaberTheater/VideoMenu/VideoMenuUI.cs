@@ -1232,6 +1232,7 @@ public class VideoMenuUI : IInitializable, IDisposable
         }
         finally
         {
+            if (!token.IsCancellationRequested) _playbackManager.RecheckSync("auto sync analysis");
             runCts.Dispose();
             if (ReferenceEquals(_autoSyncCts, runCts))
             {
@@ -1485,6 +1486,13 @@ public class VideoMenuUI : IInitializable, IDisposable
         set => _displaySettings.Brightness = value;
     }
 
+    [UIValue("display-brightness-limit")]
+    public int DisplayBrightnessLimit
+    {
+        get => _displaySettings.BrightnessLimit;
+        set => _displaySettings.BrightnessLimit = value;
+    }
+
     [UIValue("display-screen-size")]
     public int DisplayScreenSize
     {
@@ -1520,6 +1528,10 @@ public class VideoMenuUI : IInitializable, IDisposable
         return DisplaySettings.FormatPercent(value);
     }
 
+    [UIAction("format-brightness-limit")]
+    [UsedImplicitly]
+    private string FormatBrightnessLimit(object value) => DisplaySettings.FormatBrightnessLimit(value);
+
     [UIAction("format-speed")]
     [UsedImplicitly]
     private string FormatSpeed(object value) => Convert.ToSingle(value).ToString("0.00", CultureInfo.InvariantCulture) + "x";
@@ -1536,6 +1548,7 @@ public class VideoMenuUI : IInitializable, IDisposable
         _videoSearchResultsViewRect.gameObject.SetActive(false);
         _displaySettingsViewRect.gameObject.SetActive(true);
         _bsmlParserParams.EmitEvent("refresh-display-values");
+        _playbackManager.SetBrightnessPreview(true);
     }
 
     [UIAction("on-display-settings-back-action")]
@@ -1550,6 +1563,7 @@ public class VideoMenuUI : IInitializable, IDisposable
         if (!_displaySettingsOpen) return;
 
         _displaySettingsOpen = false;
+        _playbackManager.SetBrightnessPreview(false);
         _displaySettingsViewRect.gameObject.SetActive(false);
         if (refreshMenu) SetupVideoDetails();
     }
@@ -1571,6 +1585,7 @@ public class VideoMenuUI : IInitializable, IDisposable
             _currentLevel = null;
             _currentLevelIsPlaylistSong = false;
             HandleDidSelectLevel(level);
+            if (_displaySettingsOpen) _playbackManager.SetBrightnessPreview(true);
             return;
         }
 

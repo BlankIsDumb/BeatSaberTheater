@@ -11,6 +11,8 @@ public class DisplaySettings
 {
     public const int MinBrightness = 10;
     public const int MaxBrightness = 100;
+    public const int MinBrightnessLimit = 5;
+    public const int MaxBrightnessLimit = 100; // Off
 
     // 25% keeps the screen readable; up to 300% allows a dim, huge "ambient cinema" screen
     public const int MinScreenScale = 25;
@@ -25,7 +27,7 @@ public class DisplaySettings
 
     private readonly PluginConfig _config;
 
-    /// <summary>A visual setting (brightness, size, corners, edges, bloom) changed.</summary>
+    /// <summary>A visual setting (brightness, limit, size, corners, edges, bloom) changed.</summary>
     public event Action? Changed;
 
     /// <summary>The player turned Theater on or off.</summary>
@@ -51,6 +53,12 @@ public class DisplaySettings
     {
         get => Clamp(_config.ScreenBrightness, MinBrightness, MaxBrightness);
         set => SetAndNotify(() => _config.ScreenBrightness = Clamp(value, MinBrightness, MaxBrightness));
+    }
+
+    public int BrightnessLimit
+    {
+        get => Clamp(_config.BrightnessLimit, MinBrightnessLimit, MaxBrightnessLimit);
+        set => SetAndNotify(() => _config.BrightnessLimit = Clamp(value, MinBrightnessLimit, MaxBrightnessLimit));
     }
 
     public int ScreenScale
@@ -81,6 +89,11 @@ public class DisplaySettings
     public static string FormatPercent(object value)
     {
         return $"{Convert.ToSingle(value):0}%";
+    }
+
+    public static string FormatBrightnessLimit(object value)
+    {
+        return Convert.ToSingle(value) >= MaxBrightnessLimit ? "Off" : FormatPercent(value);
     }
 
     private void SetAndNotify(Action set)

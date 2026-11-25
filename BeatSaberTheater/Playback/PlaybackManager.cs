@@ -53,6 +53,8 @@ public class PlaybackManager : MonoBehaviour
     private SongPreviewPlayer? _songPreviewPlayer;
     private float _songSpeed = 1f;
     private bool _speedPendingFirstFrame;
+    private bool _whiteTestShown;
+    private bool _brightnessPreviewOpen;
 
     private enum StartSyncPhase
     {
@@ -65,6 +67,11 @@ public class PlaybackManager : MonoBehaviour
 
     private StartSyncPhase _startSyncPhase;
     private bool _startSyncLearnable;
+    private bool _startSyncJumped;
+    // Preview's 5% nudge has about 100 ms at 1x over 2 s, with some of that window spent measuring.
+    private const double PreviewStartSyncJumpThresholdMs = 80;
+    // Menu audio is separate and the muted video can use a stronger nudge; jump past the old 250 ms cutoff.
+    private const double MenuStartSyncJumpThresholdMs = 250;
     private float _startSyncFirstFrameTime;
     private float _startSyncNudgeEndTime;
     private readonly double[] _startSyncSamples = new double[6];
@@ -210,9 +217,15 @@ public class PlaybackManager : MonoBehaviour
         if (SongStartWaitPatch.ReadyToStart == IsReadyForSongStart) SongStartWaitPatch.ReadyToStart = null;
     }
 
-    // Temporary performance logger: remove together with the sync check logger
     private void Update()
     {
+        // Permanent Display preview check: keep it in Update when the performance logger is removed.
+        // Once playback and its fade are finished, an open Display view can show the white test.
+        if (_brightnessPreviewOpen && !_whiteTestShown && _activeScene == Scene.Menu &&
+            !_videoPlayer.IsPlaying && !_videoPlayer.IsFading)
+            ShowWhiteTestIfPreviewOpen();
+
+        // Temporary performance logger: remove together with the sync check logger
         if (_activeScene != Scene.SoloGameplay)
         {
             StopPerfLogger();
@@ -324,6 +337,7 @@ public class PlaybackManager : MonoBehaviour
         _recGcAlloc.Dispose();
         _xrDisplay = null;
         _frameTimesMs.Clear();
+        _lightManager?.ResetLimiterPerfWindow(active: false); // Temporary brightness limiter logging
     }
 
     // Temporary performance logger: remove together with the sync check logger.
@@ -363,6 +377,7 @@ public class PlaybackManager : MonoBehaviour
         _videoFramesShown = 0;
         _videoFramesSkipped = 0;
         _videoLongestGapMs = 0f;
+        _lightManager?.ResetLimiterPerfWindow(active: true); // Temporary brightness limiter logging
     }
 
     // Temporary performance logger: remove together with the sync check logger
@@ -399,6 +414,7 @@ public class PlaybackManager : MonoBehaviour
             _statXrCompositorGpu.Format(1, "0.####"), dropped, presented, refresh, _statDrawCalls.Format(1, "0"),
             _statBatches.Format(1, "0"), _statSetPass.Format(1, "0"), _statTriangles.Format(0.001, "0"),
             _videoFramesShown, _videoFramesSkipped, _videoLongestGapMs, _statTheaterFrameReady.Format(1000, "0")));
+        _lightManager?.LogLimiterPerfWindow(songTime, count); // Temporary brightness limiter logging
     }
 
     #endregion
@@ -412,7 +428,37 @@ public class PlaybackManager : MonoBehaviour
         if (_videoPlayer == null) return;
 
         _videoPlayer.RefreshBrightness();
-        _videoPlayer.SetScreenShaderParameters(_videoConfig);
+        SetVideoPlayerScreenShaderParameters(_videoConfig);
+        _lightManager.SnapLimiter();
+    }
+
+    public void SetBrightnessPreview(bool open)
+    {
+        _brightnessPreviewOpen = open;
+        if (open)
+        {
+            ShowWhiteTestIfPreviewOpen();
+        }
+        else if (_whiteTestShown)
+        {
+            _lightManager.ShowWhiteTest(false);
+            _videoPlayer.FadeOut();
+            _videoPlayer.ClearTexture();
+            _whiteTestShown = false;
+            SetVideoPlayerScreenShaderParameters(_videoConfig);
+        }
+    }
+
+    private void ShowWhiteTestIfPreviewOpen()
+    {
+        if (!_brightnessPreviewOpen || _whiteTestShown || _activeScene != Scene.Menu || !_config.TheaterActive ||
+            _videoPlayer.IsPlaying)
+            return;
+
+        _videoPlayer.ShowTestTexture(Texture2D.whiteTexture);
+        _lightManager.SetMapFactor(1f);
+        _lightManager.ShowWhiteTest(true);
+        _whiteTestShown = true;
     }
 
     private void OnTheaterEnabledChanged(bool enabled)
@@ -420,6 +466,7 @@ public class PlaybackManager : MonoBehaviour
         // Turning Theater back on is handled by the video menu, which reloads the selected level
         if (enabled || _videoPlayer == null) return;
 
+        SetBrightnessPreview(false);
         StopPreview(true);
         StopPlayback();
         _videoPlayer.Hide();
@@ -429,6 +476,7 @@ public class PlaybackManager : MonoBehaviour
 
     public void StopPlayback()
     {
+        CancelResyncAudioPause();
         _lateStartPending = false;
         _videoPlayer.Stop();
         StopAllCoroutines();
@@ -439,6 +487,7 @@ public class PlaybackManager : MonoBehaviour
 
     public void StopAndUnloadVideo()
     {
+        CancelResyncAudioPause();
         _videoPlayer.Stop();
         _videoPlayer.UnloadVideo();
     }
@@ -561,7 +610,14 @@ public class PlaybackManager : MonoBehaviour
 
         if (!_activeAudioSource.isPlaying) return;
 
+        var startSyncHadJumped = _startSyncJumped;
         StartSyncStep(audioSourceTime);
+        if (!startSyncHadJumped && _startSyncJumped)
+        {
+            // The positions sampled above predate the jump. Let the next frame check the new position.
+            if (audioSourceTime > 0) _lastKnownAudioSourceTime = audioSourceTime;
+            return;
+        }
 
         if (frame % 120 == 0)
             _loggingService.Debug("Frame: " + frame + " - Player: " +
@@ -597,8 +653,13 @@ public class PlaybackManager : MonoBehaviour
         //Sync if the error exceeds a threshold, but not if the video is close to the looping point
         if (Math.Abs(error) > 0.3f && Math.Abs(videoDuration - playerTime) > 0.5f &&
             _videoPlayer.IsPlaying)
-            //Audio can intentionally go out of sync when the level fails for example. Don't resync the video in that case.
-            if (_timeSyncController != null && !_timeSyncController.forcedNoAudioSync)
+            // A failed level deliberately desyncs the audio, so songs still need the time sync controller's approval.
+            // A running start check owns big errors above 250 ms in the menu and 80 ms in Preview.
+            // The 300 ms rule is only the fallback once that check is idle or complete.
+            if (_activeScene == Scene.SoloGameplay
+                    ? _timeSyncController != null && !_timeSyncController.forcedNoAudioSync
+                    : (_activeAudioSource?.isPlaying == true && !_videoPlayer.IsSyncing &&
+                       _startSyncPhase is (StartSyncPhase.Off or StartSyncPhase.Done)))
             {
                 // Temporarily Info (was Debug) for the sync check; back to Debug when the temporary loggers are removed
                 _loggingService.Info(
@@ -651,6 +712,9 @@ public class PlaybackManager : MonoBehaviour
 
     public void GameSceneLoaded()
     {
+        CancelResyncAudioPause();
+        _brightnessPreviewOpen = false;
+        SetBrightnessPreview(false);
         CancelStartSync();
         _gameSceneContainer = Plugin.gameCoreContainer;
         _gameSceneVideoPending = false;
@@ -753,7 +817,7 @@ public class PlaybackManager : MonoBehaviour
 
         if (config == null)
         {
-            _videoPlayer.Hide();
+            if (!_whiteTestShown) _videoPlayer.Hide();
             return;
         }
 
@@ -779,7 +843,7 @@ public class PlaybackManager : MonoBehaviour
         else
         {
             _videoPlayer.LoopVideo(config.loop == true);
-            _videoPlayer.SetScreenShaderParameters(config);
+            SetVideoPlayerScreenShaderParameters(config);
             _videoPlayer.SetBloomIntensity(config.bloom);
         }
 
@@ -820,6 +884,9 @@ public class PlaybackManager : MonoBehaviour
 
     private void OnMenuSceneLoaded()
     {
+        CancelResyncAudioPause();
+        _brightnessPreviewOpen = false;
+        SetBrightnessPreview(false);
         _lateStartPending = false;
         _timeSyncController = null;
         _loggingService.Info("MenuSceneLoaded");
@@ -880,7 +947,7 @@ public class PlaybackManager : MonoBehaviour
         }
 
         _offsetAfterPrepare = 0;
-        _videoPlayer.ClearTexture();
+        if (!_whiteTestShown) _videoPlayer.ClearTexture();
 
         if (_activeScene != Scene.Menu) return;
 
@@ -890,7 +957,7 @@ public class PlaybackManager : MonoBehaviour
 
     private void SceneChanged()
     {
-        _videoPlayer.SetScreenShaderParameters(_videoConfig);
+        SetVideoPlayerScreenShaderParameters(_videoConfig);
     }
 
     #endregion
@@ -921,7 +988,7 @@ public class PlaybackManager : MonoBehaviour
         if (isDefault)
         {
             StopPreview(true);
-            _videoPlayer.FadeOut();
+            if (!_whiteTestShown) _videoPlayer.FadeOut();
             _previewWaitingForPreviewPlayer = true;
 
             _loggingService.Debug("SongPreviewPlayer reverting to default loop");
@@ -932,7 +999,7 @@ public class PlaybackManager : MonoBehaviour
         if (!_previewWaitingForPreviewPlayer && Math.Abs(timeRemaining - 2.5f) > 0.001f)
         {
             StopPreview(true);
-            _videoPlayer.FadeOut();
+            if (!_whiteTestShown) _videoPlayer.FadeOut();
 
             _loggingService.Debug("Unexpected SongPreviewPlayer update, ignoring.");
             return;
@@ -1049,13 +1116,13 @@ public class PlaybackManager : MonoBehaviour
             {
                 // In menus we don't need to wait, instead the preview player starts earlier
                 ArmStartSync(learnable: false);
-                _videoPlayer.Play();
+                StartVideoPlayback();
             }
         }
         else
         {
             ArmStartSync(learnable: false);
-            _videoPlayer.Play();
+            StartVideoPlayback();
             if (!_videoPlayer.PlayerIsPrepared)
             {
                 _audioSourceStartTime = DateTime.Now;
@@ -1066,6 +1133,20 @@ public class PlaybackManager : MonoBehaviour
                 _videoPlayer.PlayerTime = totalOffset;
             }
         }
+    }
+
+    private void StartVideoPlayback()
+    {
+        if (_whiteTestShown)
+        {
+            // A delayed start can keep showing the test until Play is called. The first live texture replaces it.
+            _whiteTestShown = false;
+            _lightManager.SnapOnFirstFrame();
+            SetVideoPlayerScreenShaderParameters(_videoConfig);
+        }
+
+        _lightManager.SnapOnFirstFrame();
+        _videoPlayer.Play();
     }
 
     private void ApplySpeedOnFirstFrame(VideoPlayer player, long frame)
@@ -1111,7 +1192,7 @@ public class PlaybackManager : MonoBehaviour
                 _loggingService.Info(FormattableString.Invariant(
                     $"Start sync: the video start ran {lateMs:0} ms late (frame hitch), not learning from it"));
             if (armStartSync) ArmStartSync(learnable && onTime);
-            _videoPlayer.Play();
+            StartVideoPlayback();
             yield break;
         }
 
@@ -1130,7 +1211,7 @@ public class PlaybackManager : MonoBehaviour
             _loggingService.Info("Start sync: video not loaded when due, it will start in place once loaded");
         }
 
-        _videoPlayer.Play();
+        StartVideoPlayback();
     }
 
     // Wraps to the video length (like the existing resync code) and never goes below 0
@@ -1246,7 +1327,7 @@ public class PlaybackManager : MonoBehaviour
         var targetTime = GetTargetTime();
         if (targetTime > 0)
         {
-            _videoPlayer.Play();
+            StartVideoPlayback();
             if (recheck) ArmStartSync(learnable: false);
         }
         else
@@ -1282,8 +1363,16 @@ public class PlaybackManager : MonoBehaviour
 
         CancelStartSync();
         _videoPlayer.PlayerTime = newTime;
-        // A seek before the first note (Intro Skip, or the 300 ms rule at the start) gets a fresh start check
-        if (CanRearmStartSync("seek")) ArmStartSync(learnable: false);
+        if (_activeScene != Scene.SoloGameplay || IsPreviewPlaying)
+        {
+            _loggingService.Info($"Start sync: re-checking after a seek ({SyncCheckMode})");
+            ArmStartSync(learnable: false);
+        }
+        else
+        {
+            // A seek before the first note (Intro Skip, or the 300 ms rule at the start) gets a fresh start check
+            if (CanRearmStartSync("seek")) ArmStartSync(learnable: false);
+        }
     }
 
     // Called when the user moves the speed slider: re-time the running video to the new speed
@@ -1318,10 +1407,23 @@ public class PlaybackManager : MonoBehaviour
 
     #region Start Sync
 
-    private void ArmStartSync(bool learnable)
+    // Re-runs the start check on the playing menu or Preview video, e.g. after Auto sync's analysis, which has been seen
+    // to knock the playing video off by 70–300 ms. Songs are never touched.
+    public void RecheckSync(string reason)
+    {
+        if (_activeScene == Scene.SoloGameplay || !_videoPlayer.IsPlaying || _activeAudioSource == null ||
+            _videoPlayer.IsSyncing || _startSyncPhase is not (StartSyncPhase.Off or StartSyncPhase.Done)) return;
+
+        _loggingService.Info($"Start sync: re-checking after {reason} ({SyncCheckMode})");
+        CancelStartSync();
+        ArmStartSync(learnable: false);
+    }
+
+    private void ArmStartSync(bool learnable, bool afterJump = false)
     {
         _startSyncPhase = StartSyncPhase.WaitingForFirstFrame;
         _startSyncLearnable = learnable;
+        _startSyncJumped = afterJump;
         Array.Clear(_startSyncSamples, 0, _startSyncSamples.Length);
         _startSyncSampleCount = 0;
         _startSyncLearned = false;
@@ -1404,7 +1506,8 @@ public class PlaybackManager : MonoBehaviour
 
         var mode = SyncCheckMode;
         var absoluteErrorMs = Math.Abs(meanMs);
-        if (absoluteErrorMs > 250)
+        var isMenuOrPreview = _activeScene != Scene.SoloGameplay || IsPreviewPlaying;
+        if (!isMenuOrPreview && absoluteErrorMs > 250)
         {
             _loggingService.Info(FormattableString.Invariant(
                 $"Start sync: {mode} first frame {meanMs:+0;-0;0} ms from target, too far to nudge"));
@@ -1437,6 +1540,38 @@ public class PlaybackManager : MonoBehaviour
             }
 
             _startSyncLearned = true;
+        }
+
+        var jumpThresholdMs = IsPreviewPlaying ? PreviewStartSyncJumpThresholdMs : MenuStartSyncJumpThresholdMs;
+        if (isMenuOrPreview && absoluteErrorMs > jumpThresholdMs)
+        {
+            if (!_startSyncJumped)
+            {
+                RestoreStartSyncSpeed();
+                if (IsPreviewPlaying)
+                {
+                    // Preview audio is audible. Hold its reference clock until the seek delivers a new video frame.
+                    _videoPlayer.IsSyncing = true;
+                    _activeAudioSource.Pause();
+                    _videoPlayer.PlayerTime = startSyncTarget;
+                    _videoPlayer.RemoveFrameReadyEventHandler(PlayerStartedAfterResync);
+                    _videoPlayer.AddFrameReadyEventHandler(PlayerStartedAfterResync);
+                }
+                else
+                {
+                    // The muted menu video can seek without interrupting the song preview audio.
+                    _videoPlayer.PlayerTime = startSyncTarget;
+                }
+
+                ArmStartSync(learnable: false, afterJump: true);
+                var seekType = IsPreviewPlaying ? "held" : "plain";
+                _loggingService.Info(FormattableString.Invariant(
+                    $"Start sync: {mode} {meanMs:+0;-0;0} ms from target, jumping to it ({seekType})"));
+                return;
+            }
+
+            _loggingService.Info(FormattableString.Invariant(
+                $"Start sync: {mode} still {meanMs:+0;-0;0} ms off after a jump"));
         }
 
         if (absoluteErrorMs <= 10)
@@ -1525,11 +1660,12 @@ public class PlaybackManager : MonoBehaviour
 
     public void PrepareVideo(VideoConfig video)
     {
+        CancelResyncAudioPause();
         _previewWaitingForVideoPlayer = true;
 
         if (_prepareVideoCoroutine != null) StopCoroutine(_prepareVideoCoroutine);
 
-        _videoPlayer.ClearTexture();
+        if (!_whiteTestShown) _videoPlayer.ClearTexture();
 
         _prepareVideoCoroutine = PrepareVideoCoroutine(video);
         StartCoroutine(_prepareVideoCoroutine);
@@ -1543,19 +1679,19 @@ public class PlaybackManager : MonoBehaviour
         if (_videoConfig.DownloadState != DownloadState.Downloaded)
         {
             _loggingService.Debug("Video is not downloaded, stopping prepare");
-            _videoPlayer.FadeOut();
+            if (!_whiteTestShown) _videoPlayer.FadeOut();
             yield break;
         }
 
         _videoPlayer.LoopVideo(video.loop == true);
-        _videoPlayer.SetScreenShaderParameters(video);
+        SetVideoPlayerScreenShaderParameters(video);
         _videoPlayer.SetBloomIntensity(video.bloom);
 
         var videoPath = video.GetVideoPathForFormat(_config.Format);
         if (videoPath == null)
         {
             _loggingService.Debug("Video file with desired format not found, stopping prepare");
-            _videoPlayer.FadeOut();
+            if (!_whiteTestShown) _videoPlayer.FadeOut();
             yield break;
         }
         _loggingService.Info($"Loading video: {videoPath}");
@@ -1572,6 +1708,8 @@ public class PlaybackManager : MonoBehaviour
 
         _videoPlayer.Url = videoPath;
         _videoPlayer.Prepare();
+        // Prepare raises the stopped event, which resets the limiter. The test still owns the screen until Play.
+        if (_whiteTestShown) _lightManager.ShowWhiteTest(true);
     }
 
     #endregion
@@ -1637,17 +1775,24 @@ public class PlaybackManager : MonoBehaviour
         EndResyncAudioPause();
     }
 
-    // Ends the audio pause an offset seek started: unhooks the frame handler and plays the preview audio again
+    private void CancelResyncAudioPause()
+    {
+        // Playback is being torn down, so nothing should resume.
+        _videoPlayer.RemoveFrameReadyEventHandler(PlayerStartedAfterResync);
+        _videoPlayer.IsSyncing = false;
+    }
+
+    // Ends the audio pause a held seek started: unhooks the frame handler and plays the preview audio again
     private void EndResyncAudioPause()
     {
         _videoPlayer.RemoveFrameReadyEventHandler(PlayerStartedAfterResync);
+        _videoPlayer.IsSyncing = false;
         if (_activeAudioSource == null)
         {
             _loggingService.Warn("Active audio source was null in frame ready after resync");
             return;
         }
 
-        _videoPlayer.IsSyncing = false;
         if (!_activeAudioSource.isPlaying) _activeAudioSource.Play();
     }
 
@@ -1756,13 +1901,14 @@ public class PlaybackManager : MonoBehaviour
 
     public void StopPreview(bool stopPreviewMusic)
     {
+        CancelResyncAudioPause();
         _lateStartPending = false;
         CancelStartSync();
         if (!IsPreviewPlaying) return;
         _loggingService.Debug($"Stopping preview (stop audio source: {stopPreviewMusic}");
         _previewGeneration++;
 
-        _videoPlayer.FadeOut();
+        if (!_whiteTestShown) _videoPlayer.FadeOut();
         StopAllCoroutines();
 
         if (stopPreviewMusic && _songPreviewPlayer != null)
@@ -1830,18 +1976,22 @@ public class PlaybackManager : MonoBehaviour
 
         if (_videoConfig == null)
         {
-            _videoPlayer.FadeOut();
+            if (!_whiteTestShown) _videoPlayer.FadeOut();
             StopAllCoroutines();
             return;
         }
 
         PrepareVideo(_videoConfig);
-        if (level != null && VideoLoader.IsDlcSong(level)) _videoPlayer.FadeOut();
+        if (!_whiteTestShown && level != null && VideoLoader.IsDlcSong(level)) _videoPlayer.FadeOut();
     }
 
     public void SetVideoPlayerScreenShaderParameters(VideoConfig? config)
     {
-        _videoPlayer.SetScreenShaderParameters(config);
+        // Keep the calibration texture on default shader settings, including during slider changes and preparation.
+        var appliedConfig = _whiteTestShown ? null : config;
+        _videoPlayer.SetScreenShaderParameters(appliedConfig);
+        var correction = appliedConfig?.colorCorrection;
+        _lightManager.SetMapFactor((correction?.brightness ?? 1f) * (correction?.exposure ?? 1f));
     }
 
     private async Task ShowSongCover()
