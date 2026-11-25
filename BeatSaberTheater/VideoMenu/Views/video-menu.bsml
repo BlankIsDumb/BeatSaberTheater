@@ -6,6 +6,8 @@
             <text id='no-video-text' align='Center' text="No video configured"></text>
             <button id='search-button' text='Search' on-click='on-search-action'/>
             <button id='turn-on-button' text='Turn on Theater' on-click='on-turn-on-action' active='false'/>
+            <!-- Always shown, so Display and its white test for Brightness and Brightness Limit work without a video -->
+            <button id='no-video-display-settings-button' text='Display Settings' on-click='on-display-settings-action'/>
         </vertical>
     </bg>
     <bg id='video-details'>

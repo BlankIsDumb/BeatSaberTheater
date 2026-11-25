@@ -101,6 +101,10 @@ public class CustomVideoPlayer : MonoBehaviour
 
     public bool IsPlaying => _player.isPlaying;
     public bool IsFading => _easingHandler.IsFading;
+    // A Play() is waiting for its first frame
+    public bool IsStarting => _firstFrameStopwatch.IsRunning;
+    // The white test texture is on the screen (a playing video replaces it in Update)
+    public bool IsShowingTestTexture => _showingTestTexture;
     public bool IsPrepared => _player.isPrepared;
     [NonSerialized] public bool IsSyncing;
 
@@ -196,6 +200,9 @@ public class CustomVideoPlayer : MonoBehaviour
 
     public void UnloadVideo()
     {
+        // Nothing is starting once the video is unloaded; a running first-frame timer would block the next Play()
+        _player.frameReady -= FirstFrameReady;
+        _firstFrameStopwatch.Reset();
         _player.url = null;
         _player.Prepare();
     }
@@ -455,6 +462,7 @@ public class CustomVideoPlayer : MonoBehaviour
 
     public void SetCoverTexture(Texture? texture)
     {
+        _showingTestTexture = false; // another image takes the screen, so the white test no longer owns it
         SetTexture(texture);
 
         if (texture == null) return;
@@ -474,6 +482,7 @@ public class CustomVideoPlayer : MonoBehaviour
             return;
         }
 
+        _showingTestTexture = false; // another image takes the screen, so the white test no longer owns it
         SetTexture(texture);
         var width = (float)texture.width / texture.height * Placement.MenuPlacement.Height;
         SetDefaultMenuPlacement(width);

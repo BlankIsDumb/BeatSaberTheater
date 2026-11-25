@@ -219,10 +219,14 @@ public class PlaybackManager : MonoBehaviour
 
     private void Update()
     {
-        // Permanent Display preview check: keep it in Update when the performance logger is removed.
-        // Once playback and its fade are finished, an open Display view can show the white test.
+        // Permanent Display preview checks: keep them in Update when the performance logger is removed.
+        // The white test can end without SetBrightnessPreview, for example when a Stop() clears it or a video takes over.
+        // Release it then, so the flag never outlives the texture.
+        if (_whiteTestShown && !_videoPlayer.IsShowingTestTexture) ReleaseWhiteTest();
+        // Once playback and its fade are finished, and no Play() is waiting for its first frame, an open Display view can
+        // show the white test.
         if (_brightnessPreviewOpen && !_whiteTestShown && _activeScene == Scene.Menu &&
-            !_videoPlayer.IsPlaying && !_videoPlayer.IsFading)
+            !_videoPlayer.IsPlaying && !_videoPlayer.IsStarting && !_videoPlayer.IsFading)
             ShowWhiteTestIfPreviewOpen();
 
         // Temporary performance logger: remove together with the sync check logger
@@ -447,18 +451,36 @@ public class PlaybackManager : MonoBehaviour
             _whiteTestShown = false;
             SetVideoPlayerScreenShaderParameters(_videoConfig);
         }
+        else if (_videoPlayer.IsShowingTestTexture)
+        {
+            // A Play() has taken over from the test but its first frame hasn't arrived yet. Don't leave white on screen
+            // after Display closes; the video's own frames replace the cleared texture.
+            _videoPlayer.ClearTexture();
+        }
     }
 
     private void ShowWhiteTestIfPreviewOpen()
     {
         if (!_brightnessPreviewOpen || _whiteTestShown || _activeScene != Scene.Menu || !_config.TheaterActive ||
-            _videoPlayer.IsPlaying)
+            _videoPlayer.IsPlaying || _videoPlayer.IsStarting)
             return;
 
         _videoPlayer.ShowTestTexture(Texture2D.whiteTexture);
         _lightManager.SetMapFactor(1f);
         _lightManager.ShowWhiteTest(true);
         _whiteTestShown = true;
+    }
+
+    // The white test lost the screen without SetBrightnessPreview(false). Hand the screen back to the video settings
+    // the same way StartVideoPlayback does.
+    private void ReleaseWhiteTest()
+    {
+        _loggingService.Info(_videoPlayer.IsPlaying
+            ? "Display preview: a video replaced the white test; restoring its settings"
+            : "Display preview: the white test was cleared by a stop");
+        _whiteTestShown = false;
+        SetVideoPlayerScreenShaderParameters(_videoConfig);
+        _lightManager.SnapOnFirstFrame();
     }
 
     private void OnTheaterEnabledChanged(bool enabled)
@@ -487,8 +509,14 @@ public class PlaybackManager : MonoBehaviour
 
     public void StopAndUnloadVideo()
     {
-        CancelResyncAudioPause();
-        _videoPlayer.Stop();
+        // Full teardown before unloading, as the trash button does. Its StopAllCoroutines also cancels a load waiting
+        // for its file lock and a delayed start waiting for the song clock, either of which would undo the unload.
+        StopPlayback();
+        _videoPlayer.UnloadVideo();
+    }
+
+    public void UnloadVideo()
+    {
         _videoPlayer.UnloadVideo();
     }
 
@@ -542,7 +570,7 @@ public class PlaybackManager : MonoBehaviour
 
         if (_videoConfig.PlaybackDisabledByMissingSuggestion)
         {
-            _videoPlayer.FadeOut(0.1f);
+            if (!_whiteTestShown) _videoPlayer.FadeOut(0.1f);
         }
         else
         {
@@ -1388,10 +1416,34 @@ public class PlaybackManager : MonoBehaviour
     {
         // An offset seek may hold the preview audio paused until the next video frame, which won't come now
         if (_videoPlayer.IsSyncing) EndResyncAudioPause();
+        // The path the player failed on. Read it before anything below changes the player.
+        var failedUrl = _videoPlayer.Url;
         StopPlayback();
+
+        // GetVideoPathForFormat returns null when the selected video's file is missing, so a deleted file never counts
+        // as the selected video's own.
+        var ownPath = _videoConfig?.GetVideoPathForFormat(_config.Format);
+        var isOwnFile = string.IsNullOrEmpty(failedUrl) ||
+                        string.Equals(failedUrl, ownPath, StringComparison.OrdinalIgnoreCase);
+
+        // A path that failed must not stay on the player. The next load's Pause() would try it again, and that error would
+        // stop the next load. Selecting or retrying the video loads it again from PrepareVideo.
+        if (!string.IsNullOrEmpty(failedUrl))
+        {
+            _loggingService.Warn($"Unloading the video file that failed to play: {failedUrl}");
+            _videoPlayer.UnloadVideo();
+        }
+
         if (_videoConfig == null) return;
 
         _videoConfig.UpdateDownloadState(_config.Format);
+        if (!isOwnFile)
+        {
+            // The selected video's status comes from UpdateDownloadState above (for example "Not downloaded").
+            _loggingService.Warn("The playback error was for a different file than the selected video's; not marking it");
+            return;
+        }
+
         _videoConfig.ErrorMessage = "Theater playback error.";
         if (message.Contains("Unexpected error code (10)") && SystemInfo.graphicsDeviceVendor == "NVIDIA")
             _videoConfig.ErrorMessage += " Try disabling NVIDIA Fast Sync.";
@@ -1675,7 +1727,18 @@ public class PlaybackManager : MonoBehaviour
     {
         _videoConfig = video;
 
-        _videoPlayer.Pause();
+        // A player still pointing at a file that has since been deleted would load it again on Pause() and fail. The error
+        // handler would then stop this load before it sets the new URL.
+        var previousUrl = _videoPlayer.Url;
+        if (!string.IsNullOrEmpty(previousUrl) && !File.Exists(previousUrl))
+        {
+            _loggingService.Warn($"Previous video file no longer exists, unloading it: {previousUrl}");
+            _videoPlayer.UnloadVideo();
+        }
+        else
+        {
+            _videoPlayer.Pause();
+        }
         if (_videoConfig.DownloadState != DownloadState.Downloaded)
         {
             _loggingService.Debug("Video is not downloaded, stopping prepare");

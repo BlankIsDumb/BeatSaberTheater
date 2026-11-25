@@ -21,9 +21,18 @@ internal sealed class BrightnessLimiter
     public float LimitLinear { get; private set; }
     public float Gain { get; private set; } = 1f;
 
-    // The material multiplies gamma-space colour values, which Unity converts to linear in a linear-space project.
-    // A linear factor k therefore needs the gamma-space multiplier (approximately k^(1/2.2)).
-    public float MaterialGain => Mathf.LinearToGammaSpace(Gain);
+    // The material multiplies a gamma-space colour, which Unity converts to linear (the game runs in Linear colour space).
+    // Encoding the gain on its own overshoots at low Brightness, because the sRGB curve isn't a pure power. Encode the
+    // wanted linear level and divide by the encoded screen level, so a white frame lands exactly on the limit.
+    public float MaterialGain
+    {
+        get
+        {
+            if (Gain >= 1f) return 1f;
+            if (_screenLinear <= 0f) return Mathf.LinearToGammaSpace(Gain);
+            return Mathf.LinearToGammaSpace(Gain * _screenLinear) / Mathf.LinearToGammaSpace(_screenLinear);
+        }
+    }
 
     public void SetLevels(int brightness, int limit)
     {

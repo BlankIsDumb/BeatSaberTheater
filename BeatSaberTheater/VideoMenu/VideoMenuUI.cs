@@ -957,8 +957,11 @@ public class VideoMenuUI : IInitializable, IDisposable
                 _videoLoader.AddConfigToCache(_currentVideo, _currentLevel!);
                 break;
             default:
-                _videoLoader.DeleteVideo(_currentVideo, _config.Format);
+                // Unload before deleting so the next load cannot try the deleted file.
                 _playbackManager.StopAndUnloadVideo();
+                _videoLoader.DeleteVideo(_currentVideo, _config.Format);
+                // Any playback error described the file that's now deleted
+                _currentVideo.ErrorMessage = null;
                 SetupLevelDetailView(_currentVideo);
                 _levelDetailMenu?.RefreshContent();
                 break;
@@ -982,6 +985,9 @@ public class VideoMenuUI : IInitializable, IDisposable
         _playbackManager.StopPreview(true);
         _playbackManager.StopPlayback();
         _playbackManager.HideVideoPlayer();
+        // Unload before deleting. A stopped player keeps the file's path, and the next load would try the deleted
+        // file again and fail (2026-11-25: this broke all playback until a restart).
+        _playbackManager.UnloadVideo();
 
         if (_currentVideo.IsDownloading) _downloadService.CancelDownload(_currentVideo);
 
